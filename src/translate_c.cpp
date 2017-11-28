@@ -138,14 +138,9 @@ static void emit_warning(Context *c, const SourceLocation &sl, const char *forma
     Buf *msg = buf_vprintf(format, ap);
     va_end(ap);
 
-    StringRef filename = c->source_manager->getFilename(sl);
+    StringRef filename = c->source_manager->getFilename(c->source_manager->getSpellingLoc(sl));
     const char *filename_bytes = (const char *)filename.bytes_begin();
-    Buf *path;
-    if (filename_bytes) {
-        path = buf_create_from_str(filename_bytes);
-    } else {
-        path = buf_sprintf("(no file)");
-    }
+    Buf *path = buf_create_from_str(filename_bytes);
     unsigned line = c->source_manager->getSpellingLineNumber(sl);
     unsigned column = c->source_manager->getSpellingColumnNumber(sl);
     fprintf(stderr, "%s:%u:%u: warning: %s\n", buf_ptr(path), line, column, buf_ptr(msg));
