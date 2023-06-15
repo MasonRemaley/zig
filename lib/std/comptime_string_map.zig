@@ -29,17 +29,19 @@ pub fn ComptimeStringMap(comptime V: type, comptime kvs_list: anytype) type {
             }
         }
         mem.sort(KV, &sorted_kvs, {}, lenAsc);
-        const min_len = sorted_kvs[0].key.len;
-        const max_len = sorted_kvs[sorted_kvs.len - 1].key.len;
+        const min_len = if (sorted_kvs.len == 0) 0 else sorted_kvs[0].key.len;
+        const max_len = if (sorted_kvs.len == 0) 0 else sorted_kvs[sorted_kvs.len - 1].key.len;
         var len_indexes: [max_len + 1]usize = undefined;
         var len: usize = 0;
         var i: usize = 0;
-        while (len <= max_len) : (len += 1) {
-            // find the first keyword len == len
-            while (len > sorted_kvs[i].key.len) {
-                i += 1;
+        if (sorted_kvs.len > 0) {
+            while (len <= max_len) : (len += 1) {
+                // find the first keyword len == len
+                while (len > sorted_kvs[i].key.len) {
+                    i += 1;
+                }
+                len_indexes[len] = i;
             }
-            len_indexes[len] = i;
         }
         break :blk .{
             .min_len = min_len,
@@ -61,6 +63,8 @@ pub fn ComptimeStringMap(comptime V: type, comptime kvs_list: anytype) type {
 
         /// Returns the value for the key if any, else null.
         pub fn get(str: []const u8) ?V {
+            if (precomputed.sorted_kvs.len == 0)
+                return null;
             if (str.len < precomputed.min_len or str.len > precomputed.max_len)
                 return null;
 
@@ -172,4 +176,10 @@ fn testSet(comptime map: anytype) !void {
 
     try std.testing.expect(!map.has("missing"));
     try std.testing.expect(map.has("these"));
+}
+
+test "ComptimeStringMap empty" {
+    const map = ComptimeStringMap(void, .{});
+    try std.testing.expect(!map.has("missing"));
+    try std.testing.expect(map.get("missing") == null);
 }
