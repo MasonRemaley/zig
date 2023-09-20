@@ -7,6 +7,8 @@
 /// Reference to externally-owned data.
 source: [:0]const u8,
 
+mode: Mode,
+
 tokens: TokenList.Slice,
 /// The root AST node is assumed to be index 0. Since there can be no
 /// references to the root node, this means 0 is available to indicate null.
@@ -96,6 +98,7 @@ pub fn parse(gpa: Allocator, source: [:0]const u8, mode: Mode) Allocator.Error!A
     // TODO experiment with compacting the MultiArrayList slices here
     return Ast{
         .source = source,
+        .mode = mode,
         .tokens = tokens.toOwnedSlice(),
         .nodes = parser.nodes.toOwnedSlice(),
         .extra_data = try parser.extra_data.toOwnedSlice(gpa),

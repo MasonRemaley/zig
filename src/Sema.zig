@@ -778,7 +778,7 @@ pub fn deinit(sema: *Sema) void {
 /// Returns only the result from the body that is specified.
 /// Only appropriate to call when it is determined at comptime that this body
 /// has no peers.
-fn resolveBody(
+pub fn resolveBody(
     sema: *Sema,
     block: *Block,
     body: []const Zir.Inst.Index,
@@ -12639,6 +12639,7 @@ fn zirImport(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.
         },
     };
     try mod.semaFile(result.file);
+
     const file_root_decl_index = result.file.root_decl.unwrap().?;
     const file_root_decl = mod.declPtr(file_root_decl_index);
     try mod.declareDeclDependency(sema.owner_decl_index, file_root_decl_index);

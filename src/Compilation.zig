@@ -1318,6 +1318,8 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
                 .local_zir_cache = local_zir_cache,
                 .emit_h = emit_h,
                 .tmp_hack_arena = std.heap.ArenaAllocator.init(gpa),
+                // XXX: correct..?
+                .mode = .zig,
             };
             try module.init();
 

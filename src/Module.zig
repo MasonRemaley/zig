@@ -143,6 +143,9 @@ global_error_set: GlobalErrorSet = .{},
 /// previous analysis.
 generation: u32 = 0,
 
+// XXX: need to fill in somehow right?
+mode: Ast.Mode,
+
 stage1_flags: packed struct {
     have_winmain: bool = false,
     have_wwinmain: bool = false,
@@ -1893,7 +1896,7 @@ pub const File = struct {
         if (file.tree_loaded) return &file.tree;
 
         const source = try file.getSource(gpa);
-        file.tree = try Ast.parse(gpa, source.bytes, .zig);
+        file.tree = try Ast.parse(gpa, source.bytes, mode(file.sub_file_path));
         file.tree_loaded = true;
         return &file.tree;
     }
@@ -2011,6 +2014,18 @@ pub const File = struct {
         }
     }
 };
+
+// XXX: belong here?
+// XXX: can zon also be a package? (if so test this!)
+// XXX: autodoc?
+pub fn mode(sub_file_path: []const u8) Ast.Mode {
+    // std.debug.print("mode for {s}\n", .{sub_file_path});
+    if (std.mem.endsWith(u8, sub_file_path, ".zon")) {
+        return .zon; // XXX: ...
+    } else if (std.mem.endsWith(u8, sub_file_path, ".zig")) {
+        return .zig;
+    } else unreachable; // XXX: ...
+}
 
 /// Represents the contents of a file loaded with `@embedFile`.
 pub const EmbedFile = struct {
@@ -3591,7 +3606,7 @@ pub fn astGenFile(mod: *Module, file: *File) !void {
     file.source = source;
     file.source_loaded = true;
 
-    file.tree = try Ast.parse(gpa, source, .zig);
+    file.tree = try Ast.parse(gpa, source, mode(file.sub_file_path));
     file.tree_loaded = true;
 
     // Any potential AST errors are converted to ZIR errors here.
@@ -3910,7 +3925,7 @@ pub fn populateBuiltinFile(mod: *Module) !void {
         else => |e| return e,
     }
 
-    file.tree = try Ast.parse(gpa, file.source, .zig);
+    file.tree = try Ast.parse(gpa, file.source, mod.mode);
     file.tree_loaded = true;
     assert(file.tree.errors.len == 0); // builtin.zig must parse
 
@@ -4324,14 +4339,25 @@ pub fn semaPkg(mod: *Module, pkg: *Package) !void {
     return mod.semaFile(file);
 }
 
+// XXX: can these two share any more code than they do?
 /// Regardless of the file status, will create a `Decl` so that we
 /// can track dependencies and re-analyze when the file becomes outdated.
 pub fn semaFile(mod: *Module, file: *File) SemaError!void {
     const tracy = trace(@src());
     defer tracy.end();
 
+    // XXX: what is this check?
     if (file.root_decl != .none) return;
+    if (!file.source_loaded) {
+        // XXX: understand this case better so I can figure out if there's a nicer way to express it
+        try semaZig(mod, file);
+    } else switch (file.tree.mode) {
+        .zig => try semaZig(mod, file),
+        .zon => try semaZon(mod, file),
+    }
+}
 
+pub fn semaZig(mod: *Module, file: *File) SemaError!void {
     const gpa = mod.gpa;
 
     // Because these three things each reference each other, `undefined`
@@ -4433,6 +4459,147 @@ pub fn semaFile(mod: *Module, file: *File) SemaError!void {
         } else |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.AnalysisFail => {},
+        }
+
+        if (mod.comp.whole_cache_manifest) |whole_cache_manifest| {
+            const source = file.getSource(gpa) catch |err| {
+                try reportRetryableFileError(mod, file, "unable to load source: {s}", .{@errorName(err)});
+                return error.AnalysisFail;
+            };
+
+            const resolved_path = std.fs.path.resolve(
+                gpa,
+                if (file.pkg.root_src_directory.path) |pkg_path|
+                    &[_][]const u8{ pkg_path, file.sub_file_path }
+                else
+                    &[_][]const u8{file.sub_file_path},
+            ) catch |err| {
+                try reportRetryableFileError(mod, file, "unable to resolve path: {s}", .{@errorName(err)});
+                return error.AnalysisFail;
+            };
+            errdefer gpa.free(resolved_path);
+
+            mod.comp.whole_cache_manifest_mutex.lock();
+            defer mod.comp.whole_cache_manifest_mutex.unlock();
+            try whole_cache_manifest.addFilePostContents(resolved_path, source.bytes, source.stat);
+        }
+    } else {
+        new_decl.analysis = .file_failure;
+    }
+}
+
+pub fn semaZon(mod: *Module, file: *File) SemaError!void {
+    const gpa = mod.gpa;
+
+    // Because these three things each reference each other, `undefined`
+    // placeholders are used before being set after the struct type gains an
+    // InternPool index.
+    const new_namespace_index = try mod.createNamespace(.{
+        .parent = .none,
+        .ty = undefined,
+        .file_scope = file,
+    });
+    // const new_namespace = mod.namespacePtr(new_namespace_index);
+    errdefer mod.destroyNamespace(new_namespace_index);
+
+    const new_decl_index = try mod.allocateNewDecl(new_namespace_index, 0, null);
+    const new_decl: *Decl = mod.declPtr(new_decl_index);
+    errdefer @panic("TODO error handling");
+
+    file.root_decl = new_decl_index.toOptional();
+
+    new_decl.name = try file.fullyQualifiedName(mod);
+    new_decl.src_line = 0;
+    new_decl.is_pub = true;
+    new_decl.is_exported = false;
+    new_decl.has_align = false;
+    new_decl.has_linksection_or_addrspace = false;
+    new_decl.alignment = .none;
+    new_decl.@"linksection" = .none;
+    new_decl.has_tv = true;
+    new_decl.owns_tv = true;
+    new_decl.alive = true; // This Decl corresponds to a File and is therefore always alive.
+    new_decl.analysis = .in_progress;
+    new_decl.generation = mod.generation;
+    new_decl.name_fully_qualified = true;
+
+    if (file.status == .success_zir) {
+        assert(file.zir_loaded);
+        // XXX: naming of constant...
+        assert(file.zir.instructions.items(.tag)[Zir.main_struct_inst] == .block);
+
+        // XXX: seems like these get overwritten anyway so we don't need to set them or something???
+        // new_namespace.ty = Type.comptime_int;
+        // new_decl.ty = Type.comptime_int;
+
+        var sema_arena = std.heap.ArenaAllocator.init(gpa);
+        defer sema_arena.deinit();
+        const sema_arena_allocator = sema_arena.allocator();
+
+        var comptime_mutable_decls = std.ArrayList(Decl.Index).init(gpa);
+        defer comptime_mutable_decls.deinit();
+
+        var sema: Sema = .{
+            .mod = mod,
+            .gpa = gpa,
+            .arena = sema_arena_allocator,
+            .code = file.zir,
+            .owner_decl = new_decl,
+            .owner_decl_index = new_decl_index,
+            .func = null,
+            .func_index = .none,
+            .fn_ret_ty = Type.void,
+            .owner_func = null,
+            .owner_func_index = .none,
+            .comptime_mutable_decls = &comptime_mutable_decls,
+        };
+        defer sema.deinit();
+
+        var wip_captures = try WipCaptureScope.init(gpa, null);
+        defer wip_captures.deinit();
+
+        var block_scope: Sema.Block = .{
+            .parent = null,
+            .sema = &sema,
+            .src_decl = new_decl_index,
+            .namespace = new_namespace_index,
+            .wip_capture_scope = wip_captures.scope,
+            .instructions = .{},
+            .inlining = null,
+            .is_comptime = true,
+        };
+        defer {
+            block_scope.instructions.deinit(gpa);
+            // XXX: not needed since not set right?
+            block_scope.params.deinit(gpa);
+        }
+
+        const payload_index = file.zir.instructions.items(.data)[0].pl_node.payload_index;
+        const extra = file.zir.extraData(Zir.Inst.Block, payload_index);
+        const block = file.zir.extra[extra.end..][0..extra.data.body_len];
+        if (sema.resolveBody(
+            &block_scope,
+            block,
+            Zir.main_struct_inst,
+        )) |inst| {
+            // XXX: all of this necessary?
+            try wip_captures.finalize();
+            for (comptime_mutable_decls.items) |decl_index| {
+                const decl = mod.declPtr(decl_index);
+                try decl.intern(mod);
+            }
+            new_decl.analysis = .complete;
+            // XXX: is this okay or do we have to find some existing air somewhere?
+            var air = Air{
+                .instructions = sema.air_instructions.slice(),
+                .extra = sema.air_extra.items,
+            };
+            // XXX: can it cause other errors? replace with refToInterned when updated zig?
+            new_decl.val = (air.value(inst, mod) catch unreachable).?;
+        } else |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.AnalysisFail => return error.AnalysisFail,
+            error.NeededSourceLocation, error.GenericPoison, error.ComptimeReturn, error.ComptimeBreak => unreachable,
         }
 
         if (mod.comp.whole_cache_manifest) |whole_cache_manifest| {
@@ -4820,7 +4987,7 @@ pub fn importFile(
     if (cur_file.pkg.table.get(import_string)) |pkg| {
         return mod.importPkg(pkg);
     }
-    if (!mem.endsWith(u8, import_string, ".zig")) {
+    if (!mem.endsWith(u8, import_string, ".zig") and !mem.endsWith(u8, import_string, ".zon")) {
         return error.PackageNotFound;
     }
     const gpa = mod.gpa;
