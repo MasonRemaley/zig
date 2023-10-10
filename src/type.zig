@@ -172,7 +172,6 @@ pub const Type = struct {
     /// Prints a name suitable for `@typeName`.
     pub fn print(ty: Type, writer: anytype, mod: *Module) @TypeOf(writer).Error!void {
         const ip = &mod.intern_pool;
-        // std.debug.print("interned index is {}\n", .{ty.toIntern()});
         switch (ip.indexToKey(ty.toIntern())) {
             .int_type => |int_type| {
                 const sign_char: u8 = switch (int_type.signedness) {
@@ -3280,9 +3279,7 @@ pub const Type = struct {
     pub const @"undefined": Type = .{ .ip_index = .undefined_type };
     pub const @"noreturn": Type = .{ .ip_index = .noreturn_type };
 
-    // zig fmt: off
     pub const @"c_char": Type = .{ .ip_index = .c_char_type };
-    // zig fmt: on
     pub const @"c_short": Type = .{ .ip_index = .c_short_type };
     pub const @"c_ushort": Type = .{ .ip_index = .c_ushort_type };
     pub const @"c_int": Type = .{ .ip_index = .c_int_type };

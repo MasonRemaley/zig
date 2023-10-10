@@ -1219,7 +1219,6 @@ pub const File = struct {
 
 // XXX: belong here?
 // XXX: can zon also be a package? (if so test this!)
-// XXX: autodoc?
 pub fn mode(sub_file_path: []const u8) Ast.Mode {
     // std.debug.print("mode for {s}\n", .{sub_file_path});
     if (std.mem.endsWith(u8, sub_file_path, ".zon")) {
@@ -3554,7 +3553,6 @@ pub fn semaPkg(mod: *Module, pkg: *Package.Module) !void {
     return mod.semaFile(file);
 }
 
-// XXX: can these two share any more code than they do?
 /// Regardless of the file status, will create a `Decl` so that we
 /// can track dependencies and re-analyze when the file becomes outdated.
 pub fn semaFile(mod: *Module, file: *File) SemaError!void {
@@ -3562,14 +3560,7 @@ pub fn semaFile(mod: *Module, file: *File) SemaError!void {
     defer tracy.end();
 
     if (file.root_decl != .none) return;
-    switch (mode(file.sub_file_path)) {
-        .zig => try semaZig(mod, file),
-        .zon => try semaZon(mod, file),
-    }
-}
 
-pub fn semaZig(mod: *Module, file: *File) SemaError!void {
-    std.debug.print("semaZig '{s}'\n", .{file.sub_file_path});
     const gpa = mod.gpa;
 
     // Because these three things each reference each other, `undefined`
@@ -3580,7 +3571,6 @@ pub fn semaZig(mod: *Module, file: *File) SemaError!void {
         .ty = undefined,
         .file_scope = file,
     });
-    const new_namespace = mod.namespacePtr(new_namespace_index);
     errdefer mod.destroyNamespace(new_namespace_index);
 
     const new_decl_index = try mod.allocateNewDecl(new_namespace_index, 0, .none);
@@ -3634,24 +3624,10 @@ pub fn semaZig(mod: *Module, file: *File) SemaError!void {
     };
     defer sema.deinit();
 
-    const main_struct_inst = Zir.main_struct_inst;
-    const struct_ty = sema.getStructType(
-        new_decl_index,
-        new_namespace_index,
-        main_struct_inst,
-    ) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-    };
-    // TODO: figure out InternPool removals for incremental compilation
-    //errdefer ip.remove(struct_ty);
-    for (comptime_mutable_decls.items) |decl_index| {
-        const decl = mod.declPtr(decl_index);
-        _ = try decl.internValue(mod);
+    switch (mode(file.sub_file_path)) {
+        .zig => try semaZig(mod, &sema, new_decl_index, new_namespace_index),
+        .zon => try semaZon(mod, &sema, file, new_decl_index, new_namespace_index),
     }
-
-    new_namespace.ty = struct_ty.toType();
-    new_decl.val = struct_ty.toValue();
-    new_decl.analysis = .complete;
 
     if (mod.comp.whole_cache_manifest) |whole_cache_manifest| {
         const source = file.getSource(gpa) catch |err| {
@@ -3675,109 +3651,65 @@ pub fn semaZig(mod: *Module, file: *File) SemaError!void {
     }
 }
 
-pub fn semaZon(mod: *Module, file: *File) SemaError!void {
-    std.debug.print("semaZon '{s}'\n", .{file.sub_file_path});
+fn semaZig(
+    mod: *Module,
+    sema: *Sema,
+    new_decl_index: Decl.Index,
+    new_namespace_index: Namespace.Index,
+) SemaError!void {
+    const main_struct_inst = Zir.main_struct_inst;
+    const struct_ty = sema.getStructType(
+        new_decl_index,
+        new_namespace_index,
+        main_struct_inst,
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    // TODO: figure out InternPool removals for incremental compilation
+    //errdefer ip.remove(struct_ty);
+    for (sema.comptime_mutable_decls.items) |decl_index| {
+        const decl = mod.declPtr(decl_index);
+        _ = try decl.internValue(mod);
+    }
+
+    const new_namespace = mod.namespacePtr(new_namespace_index);
+    new_namespace.ty = struct_ty.toType();
+    const new_decl = mod.declPtr(new_decl_index);
+    new_decl.val = struct_ty.toValue();
+    new_decl.analysis = .complete;
+}
+
+fn semaZon(
+    mod: *Module,
+    sema: *Sema,
+    file: *File,
+    new_decl_index: Decl.Index,
+    new_namespace_index: Namespace.Index,
+) SemaError!void {
     const gpa = mod.gpa;
 
-    // Because these three things each reference each other, `undefined`
-    // placeholders are used before being set after the struct type gains an
-    // InternPool index.
-    const new_namespace_index = try mod.createNamespace(.{
-        .parent = .none,
-        .ty = undefined,
-        .file_scope = file,
-    });
-    const new_namespace = mod.namespacePtr(new_namespace_index);
-    errdefer mod.destroyNamespace(new_namespace_index);
+    assert(file.zir.instructions.items(.tag)[Zir.main_struct_inst] == .block);
+    assert(sema.comptime_mutable_decls.items.len == 0);
 
     // Assign the namespace type to a dummy struct
-    new_namespace.ty = (try mod.intern_pool.getStructType(gpa, .{
-        .decl = try mod.allocateNewDecl(new_namespace_index, 0, .none),
-        .namespace = new_namespace_index.toOptional(),
-        .layout = .Auto,
-        // XXX: is this okay?
-        .zir_index = 0,
-        .fields_len = 0,
-        // XXX: correct?
-        .known_non_opv = false,
-        .is_tuple = false,
-        .requires_comptime = .no,
-        .any_default_inits = false,
-        .any_comptime_fields = false,
-        .any_aligned_fields = false,
+    const new_namespace = mod.namespacePtr(new_namespace_index);
+    new_namespace.ty = (try mod.intern_pool.getAnonStructType(gpa, .{
+        .types = &.{},
+        .names = &.{},
+        .values = &.{},
     })).toType();
 
-    const new_decl_index = try mod.allocateNewDecl(new_namespace_index, 0, .none);
-    const new_decl: *Decl = mod.declPtr(new_decl_index);
-    errdefer @panic("TODO error handling");
-
-    file.root_decl = new_decl_index.toOptional();
-
-    new_decl.name = try file.fullyQualifiedName(mod);
-    new_decl.name_fully_qualified = true;
-    new_decl.src_line = 0;
-    new_decl.is_pub = true;
-    new_decl.is_exported = false;
-    new_decl.has_align = false;
-    new_decl.has_linksection_or_addrspace = false;
-    // XXX: ...don't know what to set this to, is this correct?
-    // new_decl.ty = Type.type;
-    new_decl.alignment = .none;
-    new_decl.@"linksection" = .none;
-    new_decl.has_tv = false;
-    new_decl.owns_tv = true;
-    new_decl.alive = true; // This Decl corresponds to a File and is therefore always alive.
-    new_decl.analysis = .in_progress;
-    new_decl.generation = mod.generation;
-
-    if (file.status != .success_zir) {
-        new_decl.analysis = .file_failure;
-        return;
-    }
-    assert(file.zir_loaded);
-
-    // XXX: naming of constant...
-    assert(file.zir.instructions.items(.tag)[Zir.main_struct_inst] == .block);
-
-    var sema_arena = std.heap.ArenaAllocator.init(gpa);
-    defer sema_arena.deinit();
-    const sema_arena_allocator = sema_arena.allocator();
-
-    var comptime_mutable_decls = std.ArrayList(Decl.Index).init(gpa);
-    defer comptime_mutable_decls.deinit();
-
-    var sema: Sema = .{
-        .mod = mod,
-        .gpa = gpa,
-        .arena = sema_arena_allocator,
-        .code = file.zir,
-        .owner_decl = new_decl,
-        .owner_decl_index = new_decl_index,
-        .func_index = .none,
-        .func_is_naked = false,
-        .fn_ret_ty = Type.void,
-        .fn_ret_ty_ies = null,
-        .owner_func_index = .none,
-        .comptime_mutable_decls = &comptime_mutable_decls,
-    };
-    defer sema.deinit();
-
+    const new_decl = mod.declPtr(new_decl_index);
     var block_scope: Sema.Block = .{
         .parent = null,
-        .sema = &sema,
+        .sema = sema,
         .src_decl = new_decl_index,
         .namespace = new_namespace_index,
-        // XXX: Make sure no other changes that we should reflect here?
         .wip_capture_scope = try mod.createCaptureScope(new_decl.src_scope),
         .instructions = .{},
         .inlining = null,
         .is_comptime = true,
     };
-    defer {
-        block_scope.instructions.deinit(gpa);
-        // XXX: not needed since not set right?
-        block_scope.params.deinit(gpa);
-    }
 
     const payload_index = file.zir.instructions.items(.data)[0].pl_node.payload_index;
     const extra = file.zir.extraData(Zir.Inst.Block, payload_index);
@@ -3787,61 +3719,20 @@ pub fn semaZon(mod: *Module, file: *File) SemaError!void {
         block,
         Zir.main_struct_inst,
     )) |inst| {
-        // XXX: all of this necessary?
-        for (comptime_mutable_decls.items) |decl_index| {
-            const decl = mod.declPtr(decl_index);
-            _ = try decl.internValue(mod);
-        }
+        assert(block_scope.params.len == 0);
+        assert(block_scope.instructions.items.len == 0);
 
-        // XXX: is this okay or do we have to find some existing air somewhere?
         var air = Air{
             .instructions = sema.air_instructions.slice(),
             .extra = sema.air_extra.items,
         };
-        // XXX: can it cause other errors? replace with refToInterned when updated zig?
-        // XXX: hack...read later by analyzeDeclVal, but not really supposed to do from ehre I htink. maybe delay
-        // this part of the code until then? (note that analyzeDeclVal is used for things besides imports though!)
-        // std.debug.print("INSERT INTO TABLE FOR LATER {}\n", .{new_decl_index});
-        // try sema.decl_val_table.put(sema.gpa, new_decl_index, inst);
-        // XXX: ....
         new_decl.val = (air.value(inst, mod) catch unreachable).?;
         new_decl.ty = mod.intern_pool.typeOf(new_decl.val.toIntern()).toType();
-        new_decl.has_tv = true;
-        // new_namespace.ty = Type.type;
-        // const ip = &mod.intern_pool;
-        // std.debug.print("ty's interned index is {}\n", .{new_namespace.ty.toIntern()});
-        // std.debug.print("look up rsults in {}/{}\n", .{ ip.indexToKey(new_namespace.ty.toIntern()), @intFromEnum(ip.indexToKey(new_namespace.ty.toIntern())) });
-        // std.debug.print("set new_namespace.ty to {}/{}\n", .{ new_namespace.ty.fmt(mod), new_namespace.ty.fmtDebug() });
-        // new_decl.ty = Type.type; // XXX: set to Type.type in semaZig...
-        // new_decl.ty = new_namespace.ty;
         new_decl.analysis = .complete;
     } else |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.AnalysisFail => return error.AnalysisFail,
         error.NeededSourceLocation, error.GenericPoison, error.ComptimeReturn, error.ComptimeBreak => unreachable,
-    }
-
-    if (mod.comp.whole_cache_manifest) |whole_cache_manifest| {
-        const source = file.getSource(gpa) catch |err| {
-            try reportRetryableFileError(mod, file, "unable to load source: {s}", .{@errorName(err)});
-            return error.AnalysisFail;
-        };
-
-        const resolved_path = std.fs.path.resolve(
-            gpa,
-            if (file.pkg.root_src_directory.path) |pkg_path|
-                &[_][]const u8{ pkg_path, file.sub_file_path }
-            else
-                &[_][]const u8{file.sub_file_path},
-        ) catch |err| {
-            try reportRetryableFileError(mod, file, "unable to resolve path: {s}", .{@errorName(err)});
-            return error.AnalysisFail;
-        };
-        errdefer gpa.free(resolved_path);
-
-        mod.comp.whole_cache_manifest_mutex.lock();
-        defer mod.comp.whole_cache_manifest_mutex.unlock();
-        try whole_cache_manifest.addFilePostContents(resolved_path, source.bytes, source.stat);
     }
 }
 

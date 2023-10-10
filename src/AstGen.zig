@@ -187,11 +187,8 @@ pub fn generate(gpa: Allocator, tree: Ast) Allocator.Error!Zir {
                 )) |result_inst| {
                     _ = try gen_scope.addBreak(.@"break", block_inst, result_inst);
                     try gen_scope.setBlockBody(block_inst);
-                    // XXX: never use gen_scope from this point on! (according to mlugg)
-                    // gen_scope = undefined; // XXX: can we do this to make sure of the above?
                 } else |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
-                    // XXX: ...
                     error.AnalysisFail => {}, // Handled via compile_errors below.
                 }
             },
