@@ -117,7 +117,10 @@ pub fn generate(gpa: Allocator, tree: Ast) Allocator.Error!Zir {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
 
-    var nodes_need_rl = try AstRlAnnotate.annotate(gpa, arena.allocator(), tree);
+    var nodes_need_rl: AstRlAnnotate.RlNeededSet = switch (tree.mode) {
+        .zig => try AstRlAnnotate.annotate(gpa, arena.allocator(), tree),
+        .zon => .{},
+    };
     defer nodes_need_rl.deinit(gpa);
 
     var astgen: AstGen = .{

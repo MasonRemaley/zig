@@ -13068,7 +13068,19 @@ fn zirImport(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.
     try mod.semaFile(result.file);
 
     const file_root_decl_index = result.file.root_decl.unwrap().?;
-    return sema.analyzeDeclVal(block, operand_src, file_root_decl_index);
+    const zon = Module.mode(result.file.sub_file_path) == .zon; 
+    // switch (Module.mode(result.file.sub_file_path)) {
+    //     .zig => 
+    //     // XXX: at some point, we need to do custom logic for zon so it doesn't assume the decl is a type.
+    //     // is this the right place to insert that? or should we have put it in analyzeDeclVal, or analyzeLoad, higher up hte call
+    //     // stack?
+    //     // XXX: break into function?
+    //     .zon => 
+    // }
+    // if (Module.mode(result.file.sub_file_path) == .zon) {
+    //     std.debug.print("CALL ANALYZE DECL VAL ON ZON {}\n", .{file_root_decl_index});
+    // }
+    return sema.analyzeDeclVal1(block, operand_src, file_root_decl_index, zon);
 }
 
 fn zirEmbedFile(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Inst.Ref {
@@ -31505,12 +31517,35 @@ fn analyzeDeclVal(
     src: LazySrcLoc,
     decl_index: Decl.Index,
 ) CompileError!Air.Inst.Ref {
+    return analyzeDeclVal1(
+        sema,
+        block,
+        src,
+        decl_index,
+        false
+    );
+}
+
+// XXX: ...
+fn analyzeDeclVal1(
+    sema: *Sema,
+    block: *Block,
+    src: LazySrcLoc,
+    decl_index: Decl.Index,
+    zon: bool,
+) CompileError!Air.Inst.Ref {
+    if (zon) {
+        std.debug.print(">> analyzeDeclVal ZON\n", .{});
+    } else {
+        std.debug.print(">> analyzeDeclVal ZIG\n", .{});
+    }
+    std.debug.print("  sema.mod.mode: {} {s}\n", .{@intFromEnum(sema.mod.mode), @tagName(sema.mod.mode)});
     try sema.addReferencedBy(block, src, decl_index);
     if (sema.decl_val_table.get(decl_index)) |result| {
         return result;
     }
     const decl_ref = try sema.analyzeDeclRefInner(decl_index, false);
-    const result = try sema.analyzeLoad(block, src, decl_ref, src);
+    const result = try sema.analyzeLoad1(block, src, decl_ref, src, zon);
     if (Air.refToInterned(result) != null) {
         if (!block.is_typeof) {
             try sema.decl_val_table.put(sema.gpa, decl_index, result);
@@ -31671,26 +31706,43 @@ fn analyzeLoad(
     ptr: Air.Inst.Ref,
     ptr_src: LazySrcLoc,
 ) CompileError!Air.Inst.Ref {
+    return analyzeLoad1(sema, block, src, ptr, ptr_src, false);
+}
+
+// XXX: ...better way?
+fn analyzeLoad1(
+    sema: *Sema,
+    block: *Block,
+    src: LazySrcLoc,
+    ptr: Air.Inst.Ref,
+    ptr_src: LazySrcLoc,
+    zon: bool,
+) CompileError!Air.Inst.Ref {
     const mod = sema.mod;
     const ptr_ty = sema.typeOf(ptr);
     const elem_ty = switch (ptr_ty.zigTypeTag(mod)) {
         .Pointer => ptr_ty.childType(mod),
         else => return sema.fail(block, ptr_src, "expected pointer, found '{}'", .{ptr_ty.fmt(sema.mod)}),
     };
-    if (elem_ty.zigTypeTag(mod) == .Opaque) {
-        return sema.fail(block, ptr_src, "cannot load opaque type '{}'", .{elem_ty.fmt(mod)});
-    }
 
-    if (try sema.typeHasOnePossibleValue(elem_ty)) |opv| {
-        return Air.internedToRef(opv.toIntern());
-    }
+    if (!zon) {
+        if (elem_ty.zigTypeTag(mod) == .Opaque) {
+            return sema.fail(block, ptr_src, "cannot load opaque type '{}'", .{elem_ty.fmt(mod)});
+        }
 
-    if (try sema.resolveDefinedValue(block, ptr_src, ptr)) |ptr_val| {
-        if (try sema.pointerDeref(block, src, ptr_val, ptr_ty)) |elem_val| {
-            return Air.internedToRef(elem_val.toIntern());
+        if (try sema.typeHasOnePossibleValue(elem_ty)) |opv| {
+            return Air.internedToRef(opv.toIntern());
+        }
+
+        // XXX: what's this doing?
+        if (try sema.resolveDefinedValue(block, ptr_src, ptr)) |ptr_val| {
+            if (try sema.pointerDeref(block, src, ptr_val, ptr_ty)) |elem_val| {
+                return Air.internedToRef(elem_val.toIntern());
+            }
         }
     }
 
+    // XXX: what's this doing?
     if (ptr_ty.ptrInfo(mod).flags.vector_index == .runtime) {
         const ptr_inst = Air.refToIndex(ptr).?;
         const air_tags = sema.air_instructions.items(.tag);
@@ -36494,7 +36546,7 @@ pub fn typeHasOnePossibleValue(sema: *Sema, ty: Type) CompileError!?Value {
             .repeated,
             // memoized value, not types
             .memoized_call,
-            => unreachable,
+            => |tag| std.debug.panic("tag: {s}", .{@tagName(tag)}),
 
             .type_array_big,
             .type_array_small,

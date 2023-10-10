@@ -6902,10 +6902,10 @@ pub fn getCoerced(ip: *InternPool, gpa: Allocator, val: Index, new_ty: Index) Al
         else => {},
     }
     if (std.debug.runtime_safety) {
-        std.debug.panic("InternPool.getCoerced of {s} not implemented from {s} to {s}", .{
-            @tagName(ip.indexToKey(val)),
-            @tagName(ip.indexToKey(old_ty)),
-            @tagName(ip.indexToKey(new_ty)),
+        std.debug.panic("InternPool.getCoerced of {} not implemented from {} to {}", .{
+            ip.indexToKey(val),
+            ip.indexToKey(old_ty),
+            ip.indexToKey(new_ty),
         });
     }
     unreachable;
@@ -7838,7 +7838,7 @@ pub fn aggregateTypeLen(ip: *const InternPool, ty: Index) u64 {
         .anon_struct_type => |anon_struct_type| anon_struct_type.types.len,
         .array_type => |array_type| array_type.len,
         .vector_type => |vector_type| vector_type.len,
-        else => unreachable,
+        else => |t| std.debug.panic("unreachable: {}", .{t}),
     };
 }
 
@@ -8138,7 +8138,7 @@ pub fn zigTypeTagOrPoison(ip: *const InternPool, index: Index) error{GenericPois
             .repeated,
             // memoization, not types
             .memoized_call,
-            => unreachable,
+            => |t| std.debug.panic("unreachable: {}", .{t}),
         },
         .none => unreachable, // special tag
     };
