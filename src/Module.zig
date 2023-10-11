@@ -3679,6 +3679,71 @@ fn semaZig(
     new_decl.analysis = .complete;
 }
 
+const Zon = struct {
+    gpa: Allocator,
+    tree: *const Ast,
+    intern_pool: *InternPool,
+
+    fn intern(self: *const Zon) !InternPool.Index {
+        const data = self.tree.nodes.items(.data);
+        const root = data[0].lhs;
+        return self.expr(root);
+    }
+
+    fn expr(self: *const Zon, node: Ast.Node.Index) !InternPool.Index {
+        const tags = self.tree.nodes.items(.tag);
+        switch (tags[node]) {
+            .identifier => {
+                const main_tokens = self.tree.nodes.items(.main_token);
+                const token = main_tokens[node];
+                const bytes = self.tree.tokenSlice(token);
+                if (std.mem.eql(u8, bytes, "true")) {
+                    return try self.intern_pool.get(self.gpa, .{ .simple_value = .true });
+                } else if (std.mem.eql(u8, bytes, "false")) {
+                    return try self.intern_pool.get(self.gpa, .{ .simple_value = .false });
+                } else {
+                    unreachable; // XXX: implement error handling
+                }
+            },
+            .number_literal => {
+                // XXX: use sign...
+                const is_negative = tags[node] == .negation;
+                const num_lit_node = if (is_negative) b: {
+                    const data = self.tree.nodes.items(.data);
+                    break :b data[node].lhs;
+                } else node;
+
+                const main_tokens = self.tree.nodes.items(.main_token);
+                const num_lit_token = main_tokens[num_lit_node];
+                const token_bytes = self.tree.tokenSlice(num_lit_token);
+                const number = std.zig.number_literal.parseNumberLiteral(token_bytes);
+                const key = switch (number) {
+                    .int => |i| .{ .int = .{
+                        .ty = .comptime_int_type,
+                        .storage = .{ .u64 = i },
+                    } },
+                    .big_int => unreachable, // XXX: implement
+                    .float => unreachable, // XXX: implement
+                    .failure => unreachable, // XXX: error handling!
+                };
+                return try self.intern_pool.get(self.gpa, key);
+            },
+            // XXX: make sure works with @""!
+            // XXX: curious, can I explicitly assign two enum literals to the same numercial value?
+            .enum_literal => {
+                const main_tokens = self.tree.nodes.items(.main_token);
+                const token = main_tokens[node];
+                const bytes = self.tree.tokenSlice(token);
+                return self.intern_pool.get(self.gpa, .{
+                    .enum_literal = try self.intern_pool.getOrPutString(self.gpa, bytes),
+                });
+            },
+            // XXX: also support enumFromInt! see runtime parser
+            else => unreachable, // XXX: implement error handling
+        }
+    }
+};
+
 fn semaZon(
     mod: *Module,
     sema: *Sema,
@@ -3686,54 +3751,79 @@ fn semaZon(
     new_decl_index: Decl.Index,
     new_namespace_index: Namespace.Index,
 ) SemaError!void {
-    const gpa = mod.gpa;
+    // XXX:
+    // We want to lower zon directly from AST to a struct instance. We need the result here so we're going to do the work here,
+    // but eventually, we'll also want to skip generating zir for zon files. I'm doing this side by side with having the existing
+    // infrastructure generate the value, until the generated value is usable.
 
-    assert(file.zir.instructions.items(.tag)[Zir.main_struct_inst] == .block);
-    assert(sema.comptime_mutable_decls.items.len == 0);
+    // We'll be working with `file.tree`. First, lets find out if it's a struct or a primitive literal. If it's the latter, this should
+    // be fairly easy I think.
 
-    // Assign the namespace type to a dummy struct
-    const new_namespace = mod.namespacePtr(new_namespace_index);
-    new_namespace.ty = (try mod.intern_pool.getAnonStructType(gpa, .{
-        .types = &.{},
-        .names = &.{},
-        .values = &.{},
-    })).toType();
+    const zon = Zon{
+        .gpa = mod.gpa,
+        // XXX: error handling...
+        .tree = file.getTree(mod.gpa) catch unreachable,
+        .intern_pool = &mod.intern_pool,
+    };
+    const interned = try zon.intern();
 
     const new_decl = mod.declPtr(new_decl_index);
-    var block_scope: Sema.Block = .{
-        .parent = null,
-        .sema = sema,
-        .src_decl = new_decl_index,
-        .namespace = new_namespace_index,
-        .wip_capture_scope = try mod.createCaptureScope(new_decl.src_scope),
-        .instructions = .{},
-        .inlining = null,
-        .is_comptime = true,
-    };
+    new_decl.val = interned.toValue();
+    new_decl.ty = mod.intern_pool.typeOf(new_decl.val.toIntern()).toType();
 
-    const payload_index = file.zir.instructions.items(.data)[0].pl_node.payload_index;
-    const extra = file.zir.extraData(Zir.Inst.Block, payload_index);
-    const block = file.zir.extra[extra.end..][0..extra.data.body_len];
-    if (sema.resolveBody(
-        &block_scope,
-        block,
-        Zir.main_struct_inst,
-    )) |inst| {
-        assert(block_scope.params.len == 0);
-        assert(block_scope.instructions.items.len == 0);
+    // XXX: should we set this? what about on failure, set it to failure?
+    new_decl.analysis = .complete;
 
-        var air = Air{
-            .instructions = sema.air_instructions.slice(),
-            .extra = sema.air_extra.items,
-        };
-        new_decl.val = (air.value(inst, mod) catch unreachable).?;
-        new_decl.ty = mod.intern_pool.typeOf(new_decl.val.toIntern()).toType();
-        new_decl.analysis = .complete;
-    } else |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.AnalysisFail => return error.AnalysisFail,
-        error.NeededSourceLocation, error.GenericPoison, error.ComptimeReturn, error.ComptimeBreak => unreachable,
-    }
+    // XXX: uneeded now!
+    _ = sema;
+    _ = new_namespace_index;
+
+    // assert(file.zir.instructions.items(.tag)[Zir.main_struct_inst] == .block);
+    // assert(sema.comptime_mutable_decls.items.len == 0);
+
+    // // Assign the namespace type to a dummy struct
+    // const new_namespace = mod.namespacePtr(new_namespace_index);
+    // new_namespace.ty = (try mod.intern_pool.getAnonStructType(gpa, .{
+    //     .types = &.{},
+    //     .names = &.{},
+    //     .values = &.{},
+    // })).toType();
+
+    // const new_decl = mod.declPtr(new_decl_index);
+    // var block_scope: Sema.Block = .{
+    //     .parent = null,
+    //     .sema = sema,
+    //     .src_decl = new_decl_index,
+    //     .namespace = new_namespace_index,
+    //     .wip_capture_scope = try mod.createCaptureScope(new_decl.src_scope),
+    //     .instructions = .{},
+    //     .inlining = null,
+    //     .is_comptime = true,
+    // };
+
+    // const payload_index = file.zir.instructions.items(.data)[0].pl_node.payload_index;
+    // const extra = file.zir.extraData(Zir.Inst.Block, payload_index);
+    // const block = file.zir.extra[extra.end..][0..extra.data.body_len];
+    // if (sema.resolveBody(
+    //     &block_scope,
+    //     block,
+    //     Zir.main_struct_inst,
+    // )) |inst| {
+    //     assert(block_scope.params.len == 0);
+    //     assert(block_scope.instructions.items.len == 0);
+
+    //     var air = Air{
+    //         .instructions = sema.air_instructions.slice(),
+    //         .extra = sema.air_extra.items,
+    //     };
+    //     new_decl.val = (air.value(inst, mod) catch unreachable).?;
+    //     new_decl.ty = mod.intern_pool.typeOf(new_decl.val.toIntern()).toType();
+    //     new_decl.analysis = .complete;
+    // } else |err| switch (err) {
+    //     error.OutOfMemory => return error.OutOfMemory,
+    //     error.AnalysisFail => return error.AnalysisFail,
+    //     error.NeededSourceLocation, error.GenericPoison, error.ComptimeReturn, error.ComptimeBreak => unreachable,
+    // }
 }
 
 /// Returns `true` if the Decl type changed.
