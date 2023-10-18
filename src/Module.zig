@@ -3679,8 +3679,10 @@ fn semaZig(
     new_decl.analysis = .complete;
 }
 
+// XXX: does this just store stuff that's already on module??
 const Zon = struct {
     gpa: Allocator,
+    mod: *Module, // XXX: other stuff reachable through here?
     tree: *const Ast,
     intern_pool: *InternPool,
 
@@ -3738,6 +3740,46 @@ const Zon = struct {
                     .enum_literal = try self.intern_pool.getOrPutString(self.gpa, bytes),
                 });
             },
+            .string_literal => {
+                unreachable;
+                // XXX: if i have trouble after pulling, look at addStrLit
+                // const main_tokens = self.tree.nodes.items(.main_token);
+                // const token = main_tokens[node];
+                // const raw = self.tree.tokenSlice(token);
+
+                // var buf = std.ArrayListUnmanaged(u8){};
+                // defer buf.deinit(self.gpa);
+
+                // switch (try std.zig.string_literal.parseWrite(buf.writer(self.gpa), raw)) {
+                //     .success => {},
+                //     .failure => unreachable, // XXX: error handling
+                // }
+
+                // const array_ty = try self.intern_pool.get(self.gpa, .{ .array_type = .{
+                //     .len = buf.items.len,
+                //     .sentinel = .zero_u8,
+                //     .child = .u8_type,
+                // } });
+                // const array_val = try self.mod.intern(.{ .aggregate = .{
+                //     .ty = array_ty,
+                //     .storage = .{ .bytes = buf.items },
+                // } });
+                // const ptr_ty = try self.mod.ptrType(.{
+                //     .child = array_ty,
+                //     .flags = .{
+                //         .alignment = .none,
+                //         .is_const = true,
+                //         .address_space = .generic,
+                //     },
+                // });
+                // // XXX: internedToRef assertions useful here?
+                // // XXX: need to pull before this will work...not worth making work with old verison that requires creating decls if I'm just gonna
+                // // delete that after
+                // return Air.internedToRef(try self.mod.intern(.{ .ptr = .{
+                //     .ty = ptr_ty.toIntern(),
+                //     .addr = .{ .decl = array_val },
+                // } }));
+            },
             // XXX: also support enumFromInt! see runtime parser
             else => unreachable, // XXX: implement error handling
         }
@@ -3761,6 +3803,7 @@ fn semaZon(
 
     const zon = Zon{
         .gpa = mod.gpa,
+        .mod = mod,
         // XXX: error handling...
         .tree = file.getTree(mod.gpa) catch unreachable,
         .intern_pool = &mod.intern_pool,
