@@ -3741,44 +3741,39 @@ const Zon = struct {
                 });
             },
             .string_literal => {
-                unreachable;
-                // XXX: if i have trouble after pulling, look at addStrLit
-                // const main_tokens = self.tree.nodes.items(.main_token);
-                // const token = main_tokens[node];
-                // const raw = self.tree.tokenSlice(token);
+                const main_tokens = self.tree.nodes.items(.main_token);
+                const token = main_tokens[node];
+                const raw = self.tree.tokenSlice(token);
 
-                // var buf = std.ArrayListUnmanaged(u8){};
-                // defer buf.deinit(self.gpa);
+                var bytes = std.ArrayListUnmanaged(u8){};
+                defer bytes.deinit(self.gpa);
 
-                // switch (try std.zig.string_literal.parseWrite(buf.writer(self.gpa), raw)) {
-                //     .success => {},
-                //     .failure => unreachable, // XXX: error handling
-                // }
+                switch (try std.zig.string_literal.parseWrite(bytes.writer(self.gpa), raw)) {
+                    .success => {},
+                    .failure => unreachable, // XXX: error handling
+                }
 
-                // const array_ty = try self.intern_pool.get(self.gpa, .{ .array_type = .{
-                //     .len = buf.items.len,
-                //     .sentinel = .zero_u8,
-                //     .child = .u8_type,
-                // } });
-                // const array_val = try self.mod.intern(.{ .aggregate = .{
-                //     .ty = array_ty,
-                //     .storage = .{ .bytes = buf.items },
-                // } });
-                // const ptr_ty = try self.mod.ptrType(.{
-                //     .child = array_ty,
-                //     .flags = .{
-                //         .alignment = .none,
-                //         .is_const = true,
-                //         .address_space = .generic,
-                //     },
-                // });
-                // // XXX: internedToRef assertions useful here?
-                // // XXX: need to pull before this will work...not worth making work with old verison that requires creating decls if I'm just gonna
-                // // delete that after
-                // return Air.internedToRef(try self.mod.intern(.{ .ptr = .{
-                //     .ty = ptr_ty.toIntern(),
-                //     .addr = .{ .decl = array_val },
-                // } }));
+                const array_ty = try self.mod.arrayType(.{
+                    .len = bytes.items.len,
+                    .sentinel = .zero_u8,
+                    .child = .u8_type,
+                });
+                const val = try self.mod.intern(.{ .aggregate = .{
+                    .ty = array_ty.toIntern(),
+                    .storage = .{ .bytes = bytes.items },
+                } });
+                const ptr_ty = try self.mod.ptrType(.{
+                    .child = array_ty.toIntern(),
+                    .flags = .{
+                        .alignment = .none,
+                        .is_const = true,
+                        .address_space = .generic,
+                    },
+                });
+                return try self.mod.intern(.{ .ptr = .{
+                    .ty = ptr_ty.toIntern(),
+                    .addr = .{ .anon_decl = val },
+                } });
             },
             // XXX: also support enumFromInt! see runtime parser
             else => unreachable, // XXX: implement error handling
