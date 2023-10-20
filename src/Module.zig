@@ -3679,6 +3679,7 @@ fn semaZig(
     new_decl.analysis = .complete;
 }
 
+// XXX: all error handling! make sure no leaks either etc, just getting it working first. Also, arena allocation or no?
 const Zon = struct {
     mod: *Module,
     tree: *const Ast,
@@ -3832,6 +3833,42 @@ const Zon = struct {
                     .ty = ptr_ty.toIntern(),
                     .addr = .{ .anon_decl = val },
                 } });
+            },
+            // XXX: enforce no named structs
+            // XXX: does zig support any kind of reepated array syntax or is that just mul? do we support that in zon?
+            // XXX: am i supposed to special case empty struct?
+            .struct_init_one,
+            .struct_init_one_comma,
+            .struct_init_dot_two,
+            .struct_init_dot_two_comma,
+            .struct_init_dot,
+            .struct_init_dot_comma,
+            .struct_init,
+            .struct_init_comma => {
+                var buf: [2]Ast.Node.Index = undefined;
+                const struct_init = self.tree.fullStructInit(&buf, node).?;
+                const types = try gpa.alloc(InternPool.Index, struct_init.ast.fields.len);
+                defer gpa.free(types);
+                const values = try gpa.alloc(InternPool.Index, struct_init.ast.fields.len);
+                defer gpa.free(values);
+                const names = try gpa.alloc(InternPool.NullTerminatedString, struct_init.ast.fields.len);
+                defer gpa.free(names);
+                for (struct_init.ast.fields, 0..) |field, i| {
+                    values[i] = try self.expr(field);
+                    types[i] = self.mod.intern_pool.typeOf(values[i]);
+                    // XXX: need to create or find a parseIdentifier like the runtime code that deals with @"" names
+                    names[i] = try self.mod.intern_pool.getOrPutString(gpa, self.tree.tokenSlice(self.tree.firstToken(field) - 2));
+                }
+                const struct_type = try self.mod.intern_pool.getAnonStructType(gpa, .{
+                    .types = types,
+                    .names = names,
+                    .values = values,
+                });
+                return self.mod.intern_pool.get(gpa, .{ .aggregate = .{
+                    // XXX: curious how this makes the string slice if they're not contiguous?
+                    .ty = struct_type,
+                    .storage = .{ .elems = values },
+                }});
             },
             // XXX: also support enumFromInt! see runtime parser
             else => unreachable, // XXX: implement error handling
