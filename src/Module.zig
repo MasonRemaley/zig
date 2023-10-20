@@ -3726,7 +3726,17 @@ const Zon = struct {
                         .storage = .{ .u64 = i },
                     } },
                     .big_int => unreachable, // XXX: implement
-                    .float => unreachable, // XXX: implement
+                    // XXX: I think it's okay to ignore float base, parseFloat will handle it right?
+                    .float => {
+                        // XXX: always f128?
+                        const unsigned_float = std.fmt.parseFloat(f128, token_bytes) catch unreachable;
+                        const float = if (is_negative) -unsigned_float else unsigned_float;
+                        return try self.mod.intern(.{ .float = .{
+                            .ty = try self.mod.intern(.{ .simple_type = .comptime_float }),
+                            // XXX: always store as f128?
+                            .storage = .{ .f128 = float },
+                        } });
+                    },
                     .failure => unreachable, // XXX: error handling!
                 };
                 return try self.mod.intern_pool.get(gpa, key);
