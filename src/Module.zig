@@ -3679,12 +3679,9 @@ fn semaZig(
     new_decl.analysis = .complete;
 }
 
-// XXX: does this just store stuff that's already on module??
 const Zon = struct {
-    gpa: Allocator,
-    mod: *Module, // XXX: other stuff reachable through here?
+    mod: *Module,
     tree: *const Ast,
-    intern_pool: *InternPool,
 
     fn intern(self: *const Zon) !InternPool.Index {
         const data = self.tree.nodes.items(.data);
@@ -3693,16 +3690,20 @@ const Zon = struct {
     }
 
     fn expr(self: *const Zon, node: Ast.Node.Index) !InternPool.Index {
+        const gpa = self.mod.gpa;
         const tags = self.tree.nodes.items(.tag);
         switch (tags[node]) {
             .identifier => {
                 const main_tokens = self.tree.nodes.items(.main_token);
                 const token = main_tokens[node];
                 const bytes = self.tree.tokenSlice(token);
+                // XXX: make comptime string map or something?
                 if (std.mem.eql(u8, bytes, "true")) {
-                    return try self.intern_pool.get(self.gpa, .{ .simple_value = .true });
+                    return try self.mod.intern_pool.get(gpa, .{ .simple_value = .true });
                 } else if (std.mem.eql(u8, bytes, "false")) {
-                    return try self.intern_pool.get(self.gpa, .{ .simple_value = .false });
+                    return try self.mod.intern_pool.get(gpa, .{ .simple_value = .false });
+                } else if (std.mem.eql(u8, bytes, "null")) {
+                    return try self.mod.intern_pool.get(gpa, .{ .simple_value = .null });
                 } else {
                     unreachable; // XXX: implement error handling
                 }
@@ -3728,7 +3729,7 @@ const Zon = struct {
                     .float => unreachable, // XXX: implement
                     .failure => unreachable, // XXX: error handling!
                 };
-                return try self.intern_pool.get(self.gpa, key);
+                return try self.mod.intern_pool.get(gpa, key);
             },
             // XXX: make sure works with @""!
             // XXX: curious, can I explicitly assign two enum literals to the same numercial value?
@@ -3736,8 +3737,8 @@ const Zon = struct {
                 const main_tokens = self.tree.nodes.items(.main_token);
                 const token = main_tokens[node];
                 const bytes = self.tree.tokenSlice(token);
-                return self.intern_pool.get(self.gpa, .{
-                    .enum_literal = try self.intern_pool.getOrPutString(self.gpa, bytes),
+                return self.mod.intern_pool.get(gpa, .{
+                    .enum_literal = try self.mod.intern_pool.getOrPutString(gpa, bytes),
                 });
             },
             .string_literal => {
@@ -3746,9 +3747,9 @@ const Zon = struct {
                 const raw = self.tree.tokenSlice(token);
 
                 var bytes = std.ArrayListUnmanaged(u8){};
-                defer bytes.deinit(self.gpa);
+                defer bytes.deinit(gpa);
 
-                switch (try std.zig.string_literal.parseWrite(bytes.writer(self.gpa), raw)) {
+                switch (try std.zig.string_literal.parseWrite(bytes.writer(gpa), raw)) {
                     .success => {},
                     .failure => unreachable, // XXX: error handling
                 }
@@ -3797,11 +3798,9 @@ fn semaZon(
     // be fairly easy I think.
 
     const zon = Zon{
-        .gpa = mod.gpa,
         .mod = mod,
         // XXX: error handling...
         .tree = file.getTree(mod.gpa) catch unreachable,
-        .intern_pool = &mod.intern_pool,
     };
     const interned = try zon.intern();
 
