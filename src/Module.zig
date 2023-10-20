@@ -3720,12 +3720,60 @@ const Zon = struct {
                 const num_lit_token = main_tokens[num_lit_node];
                 const token_bytes = self.tree.tokenSlice(num_lit_token);
                 const number = std.zig.number_literal.parseNumberLiteral(token_bytes);
-                const key = switch (number) {
-                    .int => |i| .{ .int = .{
-                        .ty = .comptime_int_type,
-                        .storage = .{ .u64 = i },
-                    } },
-                    .big_int => unreachable, // XXX: implement
+                switch (number) {
+                    .int => |unsigned| {
+                        const comptime_int_type = try self.mod.intern(.{ .simple_type = .comptime_int });
+                        if (is_negative) {
+                            const signed = std.math.negate(unsigned) catch {
+                                // XXX: test all cases...
+                                // XXX: can I just always do this or is that worse for perf?
+                                var result = try std.math.big.int.Managed.initSet(gpa, unsigned);
+                                defer result.deinit();
+                                result.negate();
+                                return self.mod.intern_pool.get(gpa, .{ .int = .{
+                                    .ty = comptime_int_type,
+                                    .storage = .{ .big_int = result.toConst() },
+                                }});
+                            };
+                            return self.mod.intern_pool.get(gpa, .{ .int = .{
+                                .ty = comptime_int_type,
+                                .storage = .{ .u64 = signed },
+                            }});
+                        } else {
+                            return self.mod.intern_pool.get(gpa, .{ .int = .{
+                                .ty = comptime_int_type,
+                                .storage = .{ .u64 = unsigned },
+                            }});
+                        }
+                    },
+                    // XXX: we wanna handle this at runtime too if requested to coerce into this. a little weird though, because literals can't
+                    // coerce into this, so it would work there but not here right? maybe actually not a good idea, think it through. but then
+                    // again if we don't do it, some numbers can't be parsed at runtime sooo probably worth it. Remember that this isn't an artifact
+                    // of zon, some types literally are differnt at runtime vs comptime e.g. comptime_int obviously can't be created at runtime.
+                    // XXX: any way to do big int math without allocating all args..?
+                    .big_int => |base| {
+                        // XXX: compare to `zirIntBig`, but I think that function only works because this logic was already done elsewhere.
+                        var base_managed = try std.math.big.int.Managed.initSet(gpa, @as(u8, @intFromEnum(base)));
+                        defer base_managed.deinit();
+                        const prefix_offset = @as(u8, 2) * @intFromBool(base != .decimal);
+                        var result = try std.math.big.int.Managed.init(gpa);
+                        defer result.deinit();
+                        for (token_bytes[prefix_offset..]) |char| {
+                            if (char == '_') continue;
+                            var d = try std.math.big.int.Managed.initSet(gpa, std.fmt.charToDigit(char, @intFromEnum(base)) catch unreachable);
+                            defer d.deinit();
+                            try result.mul(&result, &base_managed);
+                            if (is_negative) {
+                                try result.sub(&result, &d);
+                            } else {
+                                try result.add(&result, &d);
+                            }
+                        }
+                        return self.mod.intern_pool.get(gpa, .{ .int = .{
+                            .ty = try self.mod.intern(.{ .simple_type = .comptime_int }),
+                            .storage = .{ .big_int = result.toConst() },
+                        }});
+                    },
                     // XXX: I think it's okay to ignore float base, parseFloat will handle it right?
                     .float => {
                         // XXX: always f128?
@@ -3738,8 +3786,7 @@ const Zon = struct {
                         } });
                     },
                     .failure => unreachable, // XXX: error handling!
-                };
-                return try self.mod.intern_pool.get(gpa, key);
+                }
             },
             // XXX: make sure works with @""!
             // XXX: curious, can I explicitly assign two enum literals to the same numercial value?
