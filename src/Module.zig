@@ -3837,6 +3837,7 @@ const Zon = struct {
             // XXX: enforce no named structs
             // XXX: does zig support any kind of reepated array syntax or is that just mul? do we support that in zon?
             // XXX: am i supposed to special case empty struct?
+            // XXX: how do tuples work?
             .struct_init_one,
             .struct_init_one_comma,
             .struct_init_dot_two,
@@ -3867,6 +3868,39 @@ const Zon = struct {
                 return self.mod.intern_pool.get(gpa, .{ .aggregate = .{
                     // XXX: curious how this makes the string slice if they're not contiguous?
                     .ty = struct_type,
+                    .storage = .{ .elems = values },
+                }});
+            },
+            .array_init_one,
+            .array_init_one_comma,
+            .array_init_dot_two,
+            .array_init_dot_two_comma,
+            .array_init_dot,
+            .array_init_dot_comma ,
+            .array_init,
+            .array_init_comma => {
+                // XXX: Ast.full.ContainerField?
+                // XXX: is this slow because it has to generate a name for each field for large arrays, or is that not an issue?
+                var buf: [2]Ast.Node.Index = undefined;
+                const array_init = self.tree.fullArrayInit(&buf, node).?;
+                const types = try gpa.alloc(InternPool.Index, array_init.ast.elements.len);
+                defer gpa.free(types);
+                const values = try gpa.alloc(InternPool.Index, array_init.ast.elements.len);
+                defer gpa.free(values);
+                var names = try ArrayListUnmanaged(InternPool.NullTerminatedString).initCapacity(gpa, array_init.ast.elements.len);
+                defer names.deinit(gpa);
+                for (array_init.ast.elements, 0..) |element, i| {
+                    values[i] = try self.expr(element);
+                    types[i] = self.mod.intern_pool.typeOf(values[i]);
+                    names.appendAssumeCapacity(try self.mod.intern_pool.getOrPutString(gpa, try std.fmt.allocPrint(gpa, "{}", .{i})));
+                }
+                const tuple_type = try self.mod.intern_pool.getAnonStructType(gpa, .{
+                    .types = types,
+                    .names = names.items,
+                    .values = values,
+                });
+                return self.mod.intern_pool.get(gpa, .{ .aggregate = .{
+                    .ty = tuple_type,
                     .storage = .{ .elems = values },
                 }});
             },
