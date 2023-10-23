@@ -3595,38 +3595,16 @@ pub fn semaFile(mod: *Module, file: *File) SemaError!void {
     new_decl.analysis = .in_progress;
     new_decl.generation = mod.generation;
 
+    // XXX: hmm we actually don't want to even do this for zon right?
     if (file.status != .success_zir) {
         new_decl.analysis = .file_failure;
         return;
     }
     assert(file.zir_loaded);
 
-    var sema_arena = std.heap.ArenaAllocator.init(gpa);
-    defer sema_arena.deinit();
-    const sema_arena_allocator = sema_arena.allocator();
-
-    var comptime_mutable_decls = std.ArrayList(Decl.Index).init(gpa);
-    defer comptime_mutable_decls.deinit();
-
-    var sema: Sema = .{
-        .mod = mod,
-        .gpa = gpa,
-        .arena = sema_arena_allocator,
-        .code = file.zir,
-        .owner_decl = new_decl,
-        .owner_decl_index = new_decl_index,
-        .func_index = .none,
-        .func_is_naked = false,
-        .fn_ret_ty = Type.void,
-        .fn_ret_ty_ies = null,
-        .owner_func_index = .none,
-        .comptime_mutable_decls = &comptime_mutable_decls,
-    };
-    defer sema.deinit();
-
     switch (mode(file.sub_file_path)) {
-        .zig => try semaZig(mod, &sema, new_decl_index, new_namespace_index),
-        .zon => try semaZon(mod, &sema, file, new_decl_index, new_namespace_index),
+        .zig => try semaZig(mod, file, new_decl_index, new_namespace_index),
+        .zon => try semaZon(mod, file, new_decl_index),
     }
 
     if (mod.comp.whole_cache_manifest) |whole_cache_manifest| {
@@ -3653,10 +3631,35 @@ pub fn semaFile(mod: *Module, file: *File) SemaError!void {
 
 fn semaZig(
     mod: *Module,
-    sema: *Sema,
+    file: *File,
     new_decl_index: Decl.Index,
     new_namespace_index: Namespace.Index,
 ) SemaError!void {
+    const gpa = mod.gpa;
+
+    var sema_arena = std.heap.ArenaAllocator.init(gpa);
+    defer sema_arena.deinit();
+    const sema_arena_allocator = sema_arena.allocator();
+
+    var comptime_mutable_decls = std.ArrayList(Decl.Index).init(gpa);
+    defer comptime_mutable_decls.deinit();
+
+    var sema: Sema = .{
+        .mod = mod,
+        .gpa = gpa,
+        .arena = sema_arena_allocator,
+        .code = file.zir,
+        .owner_decl = mod.declPtr(new_decl_index),
+        .owner_decl_index = new_decl_index,
+        .func_index = .none,
+        .func_is_naked = false,
+        .fn_ret_ty = Type.void,
+        .fn_ret_ty_ies = null,
+        .owner_func_index = .none,
+        .comptime_mutable_decls = &comptime_mutable_decls,
+    };
+    defer sema.deinit();
+
     const main_struct_inst = Zir.main_struct_inst;
     const struct_ty = sema.getStructType(
         new_decl_index,
@@ -3679,7 +3682,7 @@ fn semaZig(
     new_decl.analysis = .complete;
 }
 
-// XXX: all error handling! make sure no leaks either etc, just getting it working first. Also, arena allocation or no?
+// XXX: all error handling, including syntax checks/making sure no types named! make sure no leaks either etc, just getting it working first. Also, arena allocation or no?
 const Zon = struct {
     mod: *Module,
     tree: *const Ast,
@@ -3904,27 +3907,12 @@ const Zon = struct {
                     .storage = .{ .elems = values },
                 }});
             },
-            // XXX: also support enumFromInt! see runtime parser
-            else => unreachable, // XXX: implement error handling
+            else => unreachable,
         }
     }
 };
 
-fn semaZon(
-    mod: *Module,
-    sema: *Sema,
-    file: *File,
-    new_decl_index: Decl.Index,
-    new_namespace_index: Namespace.Index,
-) SemaError!void {
-    // XXX:
-    // We want to lower zon directly from AST to a struct instance. We need the result here so we're going to do the work here,
-    // but eventually, we'll also want to skip generating zir for zon files. I'm doing this side by side with having the existing
-    // infrastructure generate the value, until the generated value is usable.
-
-    // We'll be working with `file.tree`. First, lets find out if it's a struct or a primitive literal. If it's the latter, this should
-    // be fairly easy I think.
-
+fn semaZon(mod: *Module, file: *File, new_decl_index: Decl.Index) SemaError!void {
     const zon = Zon{
         .mod = mod,
         // XXX: error handling...
@@ -3935,60 +3923,7 @@ fn semaZon(
     const new_decl = mod.declPtr(new_decl_index);
     new_decl.val = interned.toValue();
     new_decl.ty = mod.intern_pool.typeOf(new_decl.val.toIntern()).toType();
-
-    // XXX: should we set this? what about on failure, set it to failure?
     new_decl.analysis = .complete;
-
-    // XXX: uneeded now!
-    _ = sema;
-    _ = new_namespace_index;
-
-    // assert(file.zir.instructions.items(.tag)[Zir.main_struct_inst] == .block);
-    // assert(sema.comptime_mutable_decls.items.len == 0);
-
-    // // Assign the namespace type to a dummy struct
-    // const new_namespace = mod.namespacePtr(new_namespace_index);
-    // new_namespace.ty = (try mod.intern_pool.getAnonStructType(gpa, .{
-    //     .types = &.{},
-    //     .names = &.{},
-    //     .values = &.{},
-    // })).toType();
-
-    // const new_decl = mod.declPtr(new_decl_index);
-    // var block_scope: Sema.Block = .{
-    //     .parent = null,
-    //     .sema = sema,
-    //     .src_decl = new_decl_index,
-    //     .namespace = new_namespace_index,
-    //     .wip_capture_scope = try mod.createCaptureScope(new_decl.src_scope),
-    //     .instructions = .{},
-    //     .inlining = null,
-    //     .is_comptime = true,
-    // };
-
-    // const payload_index = file.zir.instructions.items(.data)[0].pl_node.payload_index;
-    // const extra = file.zir.extraData(Zir.Inst.Block, payload_index);
-    // const block = file.zir.extra[extra.end..][0..extra.data.body_len];
-    // if (sema.resolveBody(
-    //     &block_scope,
-    //     block,
-    //     Zir.main_struct_inst,
-    // )) |inst| {
-    //     assert(block_scope.params.len == 0);
-    //     assert(block_scope.instructions.items.len == 0);
-
-    //     var air = Air{
-    //         .instructions = sema.air_instructions.slice(),
-    //         .extra = sema.air_extra.items,
-    //     };
-    //     new_decl.val = (air.value(inst, mod) catch unreachable).?;
-    //     new_decl.ty = mod.intern_pool.typeOf(new_decl.val.toIntern()).toType();
-    //     new_decl.analysis = .complete;
-    // } else |err| switch (err) {
-    //     error.OutOfMemory => return error.OutOfMemory,
-    //     error.AnalysisFail => return error.AnalysisFail,
-    //     error.NeededSourceLocation, error.GenericPoison, error.ComptimeReturn, error.ComptimeBreak => unreachable,
-    // }
 }
 
 /// Returns `true` if the Decl type changed.
