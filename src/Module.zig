@@ -3816,17 +3816,17 @@ const Zon = struct {
                     .ty = array_ty.toIntern(),
                     .storage = .{ .bytes = bytes.items },
                 } });
-                const ptr_ty = try self.mod.ptrType(.{
+                const ptr_ty = (try self.mod.ptrType(.{
                     .child = array_ty.toIntern(),
                     .flags = .{
                         .alignment = .none,
                         .is_const = true,
                         .address_space = .generic,
                     },
-                });
+                })).toIntern();
                 return try self.mod.intern(.{ .ptr = .{
-                    .ty = ptr_ty.toIntern(),
-                    .addr = .{ .anon_decl = val },
+                    .ty = ptr_ty,
+                    .addr = .{ .anon_decl = .{ .val = val, .orig_ty = ptr_ty } },
                 } });
             },
             // XXX: enforce no named structs
