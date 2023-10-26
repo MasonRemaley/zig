@@ -114,9 +114,12 @@ fn appendRefsAssumeCapacity(astgen: *AstGen, refs: []const Zir.Inst.Ref) void {
 }
 
 pub fn generate(gpa: Allocator, tree: Ast) Allocator.Error!Zir {
+    assert(tree.mode != .zon);
+
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
 
+    // XXX: check no longer needed, see above assertion
     var nodes_need_rl: AstRlAnnotate.RlNeededSet = switch (tree.mode) {
         .zig => try AstRlAnnotate.annotate(gpa, arena.allocator(), tree),
         .zon => .{},
