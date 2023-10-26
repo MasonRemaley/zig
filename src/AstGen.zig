@@ -158,18 +158,40 @@ pub fn generate(gpa: Allocator, tree: Ast) Allocator.Error!Zir {
     // The AST -> ZIR lowering process assumes an AST that does not have any
     // parse errors.
     if (tree.errors.len == 0) {
-        if (AstGen.structDeclInner(
-            &gen_scope,
-            &gen_scope.base,
-            0,
-            tree.containerDeclRoot(),
-            .Auto,
-            0,
-        )) |struct_decl_ref| {
-            assert(refToIndex(struct_decl_ref).? == 0);
-        } else |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.AnalysisFail => {}, // Handled via compile_errors below.
+        switch (tree.mode) {
+            .zig => if (AstGen.structDeclInner(
+                &gen_scope,
+                &gen_scope.base,
+                0,
+                tree.containerDeclRoot(),
+                .Auto,
+                0,
+            )) |struct_decl_ref| {
+                assert(refToIndex(struct_decl_ref).? == 0);
+            } else |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.AnalysisFail => {}, // Handled via compile_errors below.
+            },
+            .zon => {
+                const root_node = tree.nodes.items(.data)[0].lhs;
+                const block_inst = try gen_scope.makeBlockInst(.block, root_node);
+                assert(block_inst == 0);
+                if (AstGen.expr(
+                    &gen_scope,
+                    &gen_scope.base,
+                    .{ .rl = .none, .ctx = .none },
+                    root_node,
+                )) |result_inst| {
+                    _ = try gen_scope.addBreak(.@"break", block_inst, result_inst);
+                    try gen_scope.setBlockBody(block_inst);
+                    // XXX: never use gen_scope from this point on! (according to mlugg)
+                    // gen_scope = undefined; // XXX: can we do this to make sure of the above?
+                } else |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    // XXX: ...
+                    error.AnalysisFail => {}, // Handled via compile_errors below.
+                }
+            },
         }
     } else {
         try lowerAstErrors(&astgen);

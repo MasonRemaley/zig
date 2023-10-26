@@ -7,6 +7,8 @@
 /// Reference to externally-owned data.
 source: [:0]const u8,
 
+mode: Mode,
+
 tokens: TokenList.Slice,
 /// The root AST node is assumed to be index 0. Since there can be no
 /// references to the root node, this means 0 is available to indicate null.

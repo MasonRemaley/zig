@@ -1430,6 +1430,8 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
                 .emit_h = emit_h,
                 .tmp_hack_arena = std.heap.ArenaAllocator.init(gpa),
                 .error_limit = options.error_limit orelse (std.math.maxInt(u16) - 1),
+                // XXX: correct..?
+                .mode = .zig,
             };
             try module.init();
 
