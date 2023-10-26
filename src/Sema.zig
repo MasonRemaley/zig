@@ -872,7 +872,7 @@ pub fn deinit(sema: *Sema) void {
 /// Returns only the result from the body that is specified.
 /// Only appropriate to call when it is determined at comptime that this body
 /// has no peers.
-pub fn resolveBody(
+fn resolveBody(
     sema: *Sema,
     block: *Block,
     body: []const Zir.Inst.Index,

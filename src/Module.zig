@@ -145,7 +145,7 @@ error_limit: ErrorInt,
 /// previous analysis.
 generation: u32 = 0,
 
-// XXX: need to fill in somehow right?
+// XXX: revisit this flag, can probably remove
 mode: Ast.Mode = undefined,
 
 stage1_flags: packed struct {
@@ -1217,15 +1217,13 @@ pub const File = struct {
     }
 };
 
-// XXX: belong here?
-// XXX: can zon also be a package? (if so test this!)
+// XXX: reivist
 pub fn mode(sub_file_path: []const u8) Ast.Mode {
-    // std.debug.print("mode for {s}\n", .{sub_file_path});
     if (std.mem.endsWith(u8, sub_file_path, ".zon")) {
-        return .zon; // XXX: ...
+        return .zon;
     } else if (std.mem.endsWith(u8, sub_file_path, ".zig")) {
         return .zig;
-    } else unreachable; // XXX: ...
+    } else unreachable;
 }
 
 /// Represents the contents of a file loaded with `@embedFile`.
@@ -3595,7 +3593,6 @@ pub fn semaFile(mod: *Module, file: *File) SemaError!void {
     new_decl.analysis = .in_progress;
     new_decl.generation = mod.generation;
 
-    // XXX: hmm we actually don't want to even do this for zon right?
     if (file.status != .success_zir) {
         new_decl.analysis = .file_failure;
         return;
@@ -3750,10 +3747,7 @@ const Zon = struct {
                             }});
                         }
                     },
-                    // XXX: we wanna handle this at runtime too if requested to coerce into this. a little weird though, because literals can't
-                    // coerce into this, so it would work there but not here right? maybe actually not a good idea, think it through. but then
-                    // again if we don't do it, some numbers can't be parsed at runtime sooo probably worth it. Remember that this isn't an artifact
-                    // of zon, some types literally are differnt at runtime vs comptime e.g. comptime_int obviously can't be created at runtime.
+                    // XXX: handle big ints at runtime too
                     // XXX: any way to do big int math without allocating all args..?
                     .big_int => |base| {
                         // XXX: compare to `zirIntBig`, but I think that function only works because this logic was already done elsewhere.
@@ -3785,7 +3779,6 @@ const Zon = struct {
                         const float = if (is_negative) -unsigned_float else unsigned_float;
                         return try self.mod.intern(.{ .float = .{
                             .ty = try self.mod.intern(.{ .simple_type = .comptime_float }),
-                            // XXX: always store as f128?
                             .storage = .{ .f128 = float },
                         } });
                     },
@@ -3793,7 +3786,6 @@ const Zon = struct {
                 }
             },
             // XXX: make sure works with @""!
-            // XXX: curious, can I explicitly assign two enum literals to the same numercial value?
             .enum_literal => {
                 const main_tokens = self.tree.nodes.items(.main_token);
                 const token = main_tokens[node];
@@ -3840,7 +3832,6 @@ const Zon = struct {
             // XXX: enforce no named structs
             // XXX: does zig support any kind of reepated array syntax or is that just mul? do we support that in zon?
             // XXX: am i supposed to special case empty struct?
-            // XXX: how do tuples work?
             .struct_init_one,
             .struct_init_one_comma,
             .struct_init_dot_two,
@@ -3869,7 +3860,6 @@ const Zon = struct {
                     .values = values,
                 });
                 return self.mod.intern_pool.get(gpa, .{ .aggregate = .{
-                    // XXX: curious how this makes the string slice if they're not contiguous?
                     .ty = struct_type,
                     .storage = .{ .elems = values },
                 }});

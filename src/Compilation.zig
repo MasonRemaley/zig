@@ -3814,6 +3814,8 @@ fn workerAstGenFile(
     wg: *WaitGroup,
     src: AstGenSrc,
 ) void {
+    assert(Module.mode(file.sub_file_path) != .zon);
+
     defer wg.finish();
 
     var child_prog_node = prog_node.start(file.sub_file_path, 0);
@@ -3867,7 +3869,6 @@ fn workerAstGenFile(
                 break :blk res;
             };
             if (import_result.is_new) {
-                // XXX: put an assertion in the worker function too?
                 if (Module.mode(import_result.file.sub_file_path) != .zon) {
                     log.debug("AstGen of {s} has import '{s}'; queuing AstGen of {s}", .{
                         file.sub_file_path, import_path, import_result.file.sub_file_path,
