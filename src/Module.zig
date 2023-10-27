@@ -145,9 +145,6 @@ error_limit: ErrorInt,
 /// previous analysis.
 generation: u32 = 0,
 
-// XXX: revisit this flag, can probably remove
-mode: Ast.Mode = undefined,
-
 stage1_flags: packed struct {
     have_winmain: bool = false,
     have_wwinmain: bool = false,
@@ -3168,7 +3165,7 @@ pub fn populateBuiltinFile(mod: *Module) !void {
         else => |e| return e,
     }
 
-    file.tree = try Ast.parse(gpa, file.source, mod.mode);
+    file.tree = try Ast.parse(gpa, file.source, mode(file.sub_file_path));
     file.tree_loaded = true;
     assert(file.tree.errors.len == 0); // builtin.zig must parse
 
