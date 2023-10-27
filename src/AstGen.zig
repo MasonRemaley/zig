@@ -19,6 +19,9 @@ const trace = @import("tracy.zig").trace;
 const BuiltinFn = @import("BuiltinFn.zig");
 const AstRlAnnotate = @import("AstRlAnnotate.zig");
 
+// XXX: temp
+pub const astgen_zon = false;
+
 gpa: Allocator,
 tree: *const Ast,
 /// The set of nodes which, given the choice, must expose a result pointer to
@@ -114,7 +117,7 @@ fn appendRefsAssumeCapacity(astgen: *AstGen, refs: []const Zir.Inst.Ref) void {
 }
 
 pub fn generate(gpa: Allocator, tree: Ast) Allocator.Error!Zir {
-    assert(tree.mode != .zon);
+    assert(astgen_zon or tree.mode != .zon);
 
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
