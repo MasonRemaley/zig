@@ -13065,9 +13065,14 @@ fn zirImport(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.
             return sema.fail(block, operand_src, "unable to open '{s}': {s}", .{ operand, @errorName(err) });
         },
     };
-    try mod.semaFile(result.file);
-    const file_root_decl_index = result.file.root_decl.unwrap().?;
-    return sema.analyzeDeclVal(block, operand_src, file_root_decl_index);
+    switch (Module.mode(result.file.sub_file_path)) {
+        .zig => {
+            try mod.semaFile(result.file);
+            const file_root_decl_index = result.file.root_decl.unwrap().?;
+            return sema.analyzeDeclVal(block, operand_src, file_root_decl_index);
+        },
+        .zon => return try mod.semaZon(result.file),
+    }
 }
 
 fn zirEmbedFile(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Inst.Ref {

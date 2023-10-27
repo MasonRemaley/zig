@@ -3519,6 +3519,7 @@ fn processOneJob(comp: *Compilation, job: Job, prog_node: *std.Progress.Node) !v
             defer named_frame.end();
 
             const module = comp.bin_file.options.module.?;
+            // XXX: this is failing
             module.ensureFuncBodyAnalyzed(func) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.AnalysisFail => return,
@@ -3812,7 +3813,7 @@ fn workerAstGenFile(
     wg: *WaitGroup,
     src: AstGenSrc,
 ) void {
-    assert(@import("AstGen.zig").astgen_zon or Module.mode(file.sub_file_path) != .zon);
+    assert(@import("AstGen.zig").astgen_zon or Module.mode(file.sub_file_path) == .zig);
 
     defer wg.finish();
 
@@ -3867,7 +3868,7 @@ fn workerAstGenFile(
                 break :blk res;
             };
             if (import_result.is_new) {
-                if (@import("AstGen.zig").astgen_zon or Module.mode(import_result.file.sub_file_path) != .zon) {
+                if (@import("AstGen.zig").astgen_zon or Module.mode(import_result.file.sub_file_path) == .zig) {
                     log.debug("AstGen of {s} has import '{s}'; queuing AstGen of {s}", .{
                         file.sub_file_path, import_path, import_result.file.sub_file_path,
                     });

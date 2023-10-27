@@ -3551,6 +3551,8 @@ pub fn semaPkg(mod: *Module, pkg: *Package.Module) !void {
 /// Regardless of the file status, will create a `Decl` so that we
 /// can track dependencies and re-analyze when the file becomes outdated.
 pub fn semaFile(mod: *Module, file: *File) SemaError!void {
+    assert(mode(file.sub_file_path) == .zig);
+
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -3566,6 +3568,7 @@ pub fn semaFile(mod: *Module, file: *File) SemaError!void {
         .ty = undefined,
         .file_scope = file,
     });
+    const new_namespace = mod.namespacePtr(new_namespace_index);
     errdefer mod.destroyNamespace(new_namespace_index);
 
     const new_decl_index = try mod.allocateNewDecl(new_namespace_index, 0, .none);
@@ -3596,10 +3599,47 @@ pub fn semaFile(mod: *Module, file: *File) SemaError!void {
     }
     assert(file.zir_loaded);
 
-    switch (mode(file.sub_file_path)) {
-        .zig => try semaZig(mod, file, new_decl_index, new_namespace_index),
-        .zon => try semaZon(mod, file, new_decl_index),
+    var sema_arena = std.heap.ArenaAllocator.init(gpa);
+    defer sema_arena.deinit();
+    const sema_arena_allocator = sema_arena.allocator();
+
+    var comptime_mutable_decls = std.ArrayList(Decl.Index).init(gpa);
+    defer comptime_mutable_decls.deinit();
+
+    var sema: Sema = .{
+        .mod = mod,
+        .gpa = gpa,
+        .arena = sema_arena_allocator,
+        .code = file.zir,
+        .owner_decl = new_decl,
+        .owner_decl_index = new_decl_index,
+        .func_index = .none,
+        .func_is_naked = false,
+        .fn_ret_ty = Type.void,
+        .fn_ret_ty_ies = null,
+        .owner_func_index = .none,
+        .comptime_mutable_decls = &comptime_mutable_decls,
+    };
+    defer sema.deinit();
+
+    const main_struct_inst = Zir.main_struct_inst;
+    const struct_ty = sema.getStructType(
+        new_decl_index,
+        new_namespace_index,
+        main_struct_inst,
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    // TODO: figure out InternPool removals for incremental compilation
+    //errdefer ip.remove(struct_ty);
+    for (comptime_mutable_decls.items) |decl_index| {
+        const decl = mod.declPtr(decl_index);
+        _ = try decl.internValue(mod);
     }
+
+    new_namespace.ty = struct_ty.toType();
+    new_decl.val = struct_ty.toValue();
+    new_decl.analysis = .complete;
 
     if (mod.comp.whole_cache_manifest) |whole_cache_manifest| {
         const source = file.getSource(gpa) catch |err| {
@@ -3623,71 +3663,12 @@ pub fn semaFile(mod: *Module, file: *File) SemaError!void {
     }
 }
 
-fn semaZig(
-    mod: *Module,
-    file: *File,
-    new_decl_index: Decl.Index,
-    new_namespace_index: Namespace.Index,
-) SemaError!void {
-    const gpa = mod.gpa;
-
-    var sema_arena = std.heap.ArenaAllocator.init(gpa);
-    defer sema_arena.deinit();
-    const sema_arena_allocator = sema_arena.allocator();
-
-    var comptime_mutable_decls = std.ArrayList(Decl.Index).init(gpa);
-    defer comptime_mutable_decls.deinit();
-
-    var sema: Sema = .{
-        .mod = mod,
-        .gpa = gpa,
-        .arena = sema_arena_allocator,
-        .code = file.zir,
-        .owner_decl = mod.declPtr(new_decl_index),
-        .owner_decl_index = new_decl_index,
-        .func_index = .none,
-        .func_is_naked = false,
-        .fn_ret_ty = Type.void,
-        .fn_ret_ty_ies = null,
-        .owner_func_index = .none,
-        .comptime_mutable_decls = &comptime_mutable_decls,
-    };
-    defer sema.deinit();
-
-    const main_struct_inst = Zir.main_struct_inst;
-    const struct_ty = sema.getStructType(
-        new_decl_index,
-        new_namespace_index,
-        main_struct_inst,
-    ) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-    };
-    // TODO: figure out InternPool removals for incremental compilation
-    //errdefer ip.remove(struct_ty);
-    for (sema.comptime_mutable_decls.items) |decl_index| {
-        const decl = mod.declPtr(decl_index);
-        _ = try decl.internValue(mod);
-    }
-
-    const new_namespace = mod.namespacePtr(new_namespace_index);
-    new_namespace.ty = struct_ty.toType();
-    const new_decl = mod.declPtr(new_decl_index);
-    new_decl.val = struct_ty.toValue();
-    new_decl.analysis = .complete;
-}
-
-// XXX: all error handling, including syntax checks/making sure no types named! make sure no leaks either etc, just getting it working first. Also, arena allocation or no?
-const Zon = struct {
+// XXX: do we support void?
+const LowerZon = struct {
     mod: *Module,
     tree: *const Ast,
 
-    fn intern(self: *const Zon) !InternPool.Index {
-        const data = self.tree.nodes.items(.data);
-        const root = data[0].lhs;
-        return self.expr(root);
-    }
-
-    fn expr(self: *const Zon, node: Ast.Node.Index) !InternPool.Index {
+    fn expr(self: *const LowerZon, node: Ast.Node.Index) !InternPool.Index {
         const gpa = self.mod.gpa;
         const tags = self.tree.nodes.items(.tag);
         switch (tags[node]) {
@@ -3697,11 +3678,11 @@ const Zon = struct {
                 const bytes = self.tree.tokenSlice(token);
                 // XXX: make comptime string map or something?
                 if (std.mem.eql(u8, bytes, "true")) {
-                    return try self.mod.intern_pool.get(gpa, .{ .simple_value = .true });
+                    return .bool_true;
                 } else if (std.mem.eql(u8, bytes, "false")) {
-                    return try self.mod.intern_pool.get(gpa, .{ .simple_value = .false });
+                    return .bool_false;
                 } else if (std.mem.eql(u8, bytes, "null")) {
-                    return try self.mod.intern_pool.get(gpa, .{ .simple_value = .null });
+                    return .null_value;
                 } else {
                     unreachable; // XXX: implement error handling
                 }
@@ -3899,18 +3880,22 @@ const Zon = struct {
     }
 };
 
-fn semaZon(mod: *Module, file: *File, new_decl_index: Decl.Index) SemaError!void {
-    const zon = Zon{
-        .mod = mod,
-        // XXX: error handling...
-        .tree = file.getTree(mod.gpa) catch unreachable,
-    };
-    const interned = try zon.intern();
+// XXX: all error handling, including syntax checks/making sure no types named! make sure no leaks either etc, just getting it working first. Also, arena allocation or no?
+// XXX: pub temporary
+pub fn semaZon(mod: *Module, file: *File) !Air.Inst.Ref {
+    // XXX: error handling...
+    const tree = file.getTree(mod.gpa) catch unreachable;
+    assert(file.tree.errors.len == 0);
 
-    const new_decl = mod.declPtr(new_decl_index);
-    new_decl.val = interned.toValue();
-    new_decl.ty = mod.intern_pool.typeOf(new_decl.val.toIntern()).toType();
-    new_decl.analysis = .complete;
+    const data = tree.nodes.items(.data);
+    const root = data[0].lhs;
+
+    const lower_zon = LowerZon{
+        .mod = mod,
+        .tree = tree,
+    };
+    const interned = try lower_zon.expr(root);
+    return Air.internedToRef(interned);
 }
 
 /// Returns `true` if the Decl type changed.
