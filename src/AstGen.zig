@@ -119,7 +119,6 @@ pub fn generate(gpa: Allocator, tree: Ast) Allocator.Error!Zir {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
 
-    // XXX: check no longer needed, see above assertion
     var nodes_need_rl = try AstRlAnnotate.annotate(gpa, arena.allocator(), tree);
     defer nodes_need_rl.deinit(gpa);
 

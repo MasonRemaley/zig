@@ -3663,7 +3663,6 @@ pub fn semaFile(mod: *Module, file: *File) SemaError!void {
     }
 }
 
-// XXX: do we support void?
 const LowerZon = struct {
     mod: *Module,
     tree: *const Ast,
@@ -3874,6 +3873,14 @@ const LowerZon = struct {
                     .ty = tuple_type,
                     .storage = .{ .elems = values },
                 }});
+            },
+            .block_two => {
+                const data = self.tree.nodes.items(.data);
+                if (data[node].lhs == 0 or data[node].rhs == 0) {
+                    return .void_value;
+                } else {
+                    unreachable;
+                }
             },
             else => unreachable,
         }
