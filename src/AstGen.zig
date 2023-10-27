@@ -19,9 +19,6 @@ const trace = @import("tracy.zig").trace;
 const BuiltinFn = @import("BuiltinFn.zig");
 const AstRlAnnotate = @import("AstRlAnnotate.zig");
 
-// XXX: temp
-pub const astgen_zon = false;
-
 gpa: Allocator,
 tree: *const Ast,
 /// The set of nodes which, given the choice, must expose a result pointer to
@@ -117,16 +114,13 @@ fn appendRefsAssumeCapacity(astgen: *AstGen, refs: []const Zir.Inst.Ref) void {
 }
 
 pub fn generate(gpa: Allocator, tree: Ast) Allocator.Error!Zir {
-    assert(astgen_zon or tree.mode == .zig);
+    assert(tree.mode == .zig);
 
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
 
     // XXX: check no longer needed, see above assertion
-    var nodes_need_rl: AstRlAnnotate.RlNeededSet = switch (tree.mode) {
-        .zig => try AstRlAnnotate.annotate(gpa, arena.allocator(), tree),
-        .zon => .{},
-    };
+    var nodes_need_rl = try AstRlAnnotate.annotate(gpa, arena.allocator(), tree);
     defer nodes_need_rl.deinit(gpa);
 
     var astgen: AstGen = .{
@@ -167,37 +161,18 @@ pub fn generate(gpa: Allocator, tree: Ast) Allocator.Error!Zir {
     // The AST -> ZIR lowering process assumes an AST that does not have any
     // parse errors.
     if (tree.errors.len == 0) {
-        switch (tree.mode) {
-            .zig => if (AstGen.structDeclInner(
-                &gen_scope,
-                &gen_scope.base,
-                0,
-                tree.containerDeclRoot(),
-                .Auto,
-                0,
-            )) |struct_decl_ref| {
-                assert(refToIndex(struct_decl_ref).? == 0);
-            } else |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.AnalysisFail => {}, // Handled via compile_errors below.
-            },
-            .zon => {
-                const root_node = tree.nodes.items(.data)[0].lhs;
-                const block_inst = try gen_scope.makeBlockInst(.block, root_node);
-                assert(block_inst == 0);
-                if (AstGen.expr(
-                    &gen_scope,
-                    &gen_scope.base,
-                    .{ .rl = .none, .ctx = .none },
-                    root_node,
-                )) |result_inst| {
-                    _ = try gen_scope.addBreak(.@"break", block_inst, result_inst);
-                    try gen_scope.setBlockBody(block_inst);
-                } else |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.AnalysisFail => {}, // Handled via compile_errors below.
-                }
-            },
+        if (AstGen.structDeclInner(
+            &gen_scope,
+            &gen_scope.base,
+            0,
+            tree.containerDeclRoot(),
+            .Auto,
+            0,
+        )) |struct_decl_ref| {
+            assert(refToIndex(struct_decl_ref).? == 0);
+        } else |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.AnalysisFail => {}, // Handled via compile_errors below.
         }
     } else {
         try lowerAstErrors(&astgen);
