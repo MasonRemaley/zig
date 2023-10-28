@@ -3665,16 +3665,115 @@ pub fn semaFile(mod: *Module, file: *File) SemaError!void {
 
 const LowerZon = struct {
     mod: *Module,
-    tree: *const Ast,
+    file: *File,
 
-    fn expr(self: *const LowerZon, node: Ast.Node.Index) !InternPool.Index {
+    // XXX: return error or return poisoned value?
+    pub fn fail(
+        self: *LowerZon,
+        node: Ast.Node.Index,
+        comptime format: []const u8,
+        args: anytype,
+    ) CompileError {
+        // XXX: good idea?
+        @setCold(true);
+
+        const src_loc = .{
+            .file_scope = self.file,
+            .parent_decl_node = 0,
+            .lazy = .{ .node_abs = node },
+        };
+        const err_msg = try Module.ErrorMsg.create(self.mod.gpa, src_loc, format, args);
+        try self.mod.failed_files.putNoClobber(self.mod.gpa, self.file, err_msg);
+        return error.AnalysisFail;
+    }
+
+    fn lower(self: *LowerZon) !InternPool.Index {
+        const tree = self.file.getTree(self.mod.gpa) catch unreachable;
+        if (tree.errors.len != 0) {
+            return self.lowerAstErrors();
+        }
+
+        const data = tree.nodes.items(.data);
+        const root = data[0].lhs;
+        return self.expr(root);
+    }
+
+    // XXX: can any of this be pulled out from AstGen.lowerAstErrors into a common function?
+    fn lowerAstErrors(self: *LowerZon) CompileError {
+        const tree = self.file.tree;
+        assert(tree.errors.len > 0);
+
         const gpa = self.mod.gpa;
-        const tags = self.tree.nodes.items(.tag);
+        const parse_err = tree.errors[0];
+
+        var buf: std.ArrayListUnmanaged(u8) = .{};
+        defer buf.deinit(gpa);
+
+        // Create the main error
+        buf.clearRetainingCapacity();
+        try tree.renderError(parse_err, buf.writer(gpa));
+        var err_msg = try Module.ErrorMsg.create(
+            gpa,
+            .{
+                .file_scope = self.file,
+                .parent_decl_node = 0,
+                .lazy = .{ .token_abs = parse_err.token + @intFromBool(parse_err.token_is_prev) },
+            },
+            "{s}",
+            .{buf.items},
+        );
+
+        // XXX: test this, make sure I got it right...
+        // Check for invalid bytes
+        const token_starts = tree.tokens.items(.start);
+        const token_tags = tree.tokens.items(.tag);
+        if (token_tags[parse_err.token + @intFromBool(parse_err.token_is_prev)] == .invalid) {
+            const bad_off: u32 = @intCast(tree.tokenSlice(parse_err.token + @intFromBool(parse_err.token_is_prev)).len);
+            const byte_abs = token_starts[parse_err.token + @intFromBool(parse_err.token_is_prev)] + bad_off;
+            try self.mod.errNoteNonLazy(
+                .{
+                    .file_scope = self.file,
+                    .parent_decl_node = 0,
+                    .lazy = .{ .byte_abs = byte_abs },
+                },
+                err_msg,
+                "invalid byte: '{'}'",
+                .{ std.zig.fmtEscapes(tree.source[byte_abs..][0..1]) },
+            );
+        }
+
+        // XXX: do I need to explicitly mention that it's a note somehow or is that information already encoded in the message?
+        // Create the notes
+        for (tree.errors[1..]) |note| {
+            if (!note.is_note) break;
+
+            buf.clearRetainingCapacity();
+            try tree.renderError(note, buf.writer(gpa));
+            try self.mod.errNoteNonLazy(
+                .{
+                    .file_scope = self.file,
+                    .parent_decl_node = 0,
+                    .lazy = .{ .token_abs = note.token + @intFromBool(note.token_is_prev) },
+                },
+                err_msg,
+                "{s}",
+                .{buf.items},
+            );
+        }
+
+        try self.mod.failed_files.putNoClobber(self.mod.gpa, self.file, err_msg);
+        return error.AnalysisFail;
+    }
+
+
+    fn expr(self: *LowerZon, node: Ast.Node.Index) !InternPool.Index {
+        const gpa = self.mod.gpa;
+        const tags = self.file.tree.nodes.items(.tag);
         switch (tags[node]) {
             .identifier => {
-                const main_tokens = self.tree.nodes.items(.main_token);
+                const main_tokens = self.file.tree.nodes.items(.main_token);
                 const token = main_tokens[node];
-                const bytes = self.tree.tokenSlice(token);
+                const bytes = self.file.tree.tokenSlice(token);
                 // XXX: make comptime string map or something?
                 if (std.mem.eql(u8, bytes, "true")) {
                     return .bool_true;
@@ -3683,20 +3782,20 @@ const LowerZon = struct {
                 } else if (std.mem.eql(u8, bytes, "null")) {
                     return .null_value;
                 } else {
-                    unreachable; // XXX: implement error handling
+                    return self.fail(node, "use of unknown identifier '{s}'", .{ bytes });
                 }
             },
             .number_literal => {
                 // XXX: use sign...
                 const is_negative = tags[node] == .negation;
                 const num_lit_node = if (is_negative) b: {
-                    const data = self.tree.nodes.items(.data);
+                    const data = self.file.tree.nodes.items(.data);
                     break :b data[node].lhs;
                 } else node;
 
-                const main_tokens = self.tree.nodes.items(.main_token);
+                const main_tokens = self.file.tree.nodes.items(.main_token);
                 const num_lit_token = main_tokens[num_lit_node];
-                const token_bytes = self.tree.tokenSlice(num_lit_token);
+                const token_bytes = self.file.tree.tokenSlice(num_lit_token);
                 const number = std.zig.number_literal.parseNumberLiteral(token_bytes);
                 switch (number) {
                     .int => |unsigned| {
@@ -3764,17 +3863,17 @@ const LowerZon = struct {
             },
             // XXX: make sure works with @""!
             .enum_literal => {
-                const main_tokens = self.tree.nodes.items(.main_token);
+                const main_tokens = self.file.tree.nodes.items(.main_token);
                 const token = main_tokens[node];
-                const bytes = self.tree.tokenSlice(token);
+                const bytes = self.file.tree.tokenSlice(token);
                 return self.mod.intern_pool.get(gpa, .{
                     .enum_literal = try self.mod.intern_pool.getOrPutString(gpa, bytes),
                 });
             },
             .string_literal => {
-                const main_tokens = self.tree.nodes.items(.main_token);
+                const main_tokens = self.file.tree.nodes.items(.main_token);
                 const token = main_tokens[node];
-                const raw = self.tree.tokenSlice(token);
+                const raw = self.file.tree.tokenSlice(token);
 
                 var bytes = std.ArrayListUnmanaged(u8){};
                 defer bytes.deinit(gpa);
@@ -3818,7 +3917,7 @@ const LowerZon = struct {
             .struct_init,
             .struct_init_comma => {
                 var buf: [2]Ast.Node.Index = undefined;
-                const struct_init = self.tree.fullStructInit(&buf, node).?;
+                const struct_init = self.file.tree.fullStructInit(&buf, node).?;
                 const types = try gpa.alloc(InternPool.Index, struct_init.ast.fields.len);
                 defer gpa.free(types);
                 const values = try gpa.alloc(InternPool.Index, struct_init.ast.fields.len);
@@ -3829,7 +3928,7 @@ const LowerZon = struct {
                     values[i] = try self.expr(field);
                     types[i] = self.mod.intern_pool.typeOf(values[i]);
                     // XXX: need to create or find a parseIdentifier like the runtime code that deals with @"" names
-                    names[i] = try self.mod.intern_pool.getOrPutString(gpa, self.tree.tokenSlice(self.tree.firstToken(field) - 2));
+                    names[i] = try self.mod.intern_pool.getOrPutString(gpa, self.file.tree.tokenSlice(self.file.tree.firstToken(field) - 2));
                 }
                 const struct_type = try self.mod.intern_pool.getAnonStructType(gpa, .{
                     .types = types,
@@ -3852,7 +3951,7 @@ const LowerZon = struct {
                 // XXX: Ast.full.ContainerField?
                 // XXX: is this slow because it has to generate a name for each field for large arrays, or is that not an issue?
                 var buf: [2]Ast.Node.Index = undefined;
-                const array_init = self.tree.fullArrayInit(&buf, node).?;
+                const array_init = self.file.tree.fullArrayInit(&buf, node).?;
                 const types = try gpa.alloc(InternPool.Index, array_init.ast.elements.len);
                 defer gpa.free(types);
                 const values = try gpa.alloc(InternPool.Index, array_init.ast.elements.len);
@@ -3875,14 +3974,16 @@ const LowerZon = struct {
                 }});
             },
             .block_two => {
-                const data = self.tree.nodes.items(.data);
+                const data = self.file.tree.nodes.items(.data);
                 if (data[node].lhs == 0 or data[node].rhs == 0) {
                     return .void_value;
                 } else {
                     unreachable;
                 }
             },
-            else => unreachable,
+            // XXX: test syntax errors too!
+            // XXX: okay so tree.errors gets populated, how do we report those?
+            else => return self.fail(node, "expected ZON value", .{}),
         }
     }
 };
@@ -3890,18 +3991,11 @@ const LowerZon = struct {
 // XXX: all error handling, including syntax checks/making sure no types named! make sure no leaks either etc, just getting it working first. Also, arena allocation or no?
 // XXX: pub temporary
 pub fn semaZon(mod: *Module, file: *File) !Air.Inst.Ref {
-    // XXX: error handling...
-    const tree = file.getTree(mod.gpa) catch unreachable;
-    assert(file.tree.errors.len == 0);
-
-    const data = tree.nodes.items(.data);
-    const root = data[0].lhs;
-
-    const lower_zon = LowerZon{
+    var lower_zon = LowerZon{
         .mod = mod,
-        .tree = tree,
+        .file = file,
     };
-    const interned = try lower_zon.expr(root);
+    const interned = try lower_zon.lower();
     return Air.internedToRef(interned);
 }
 
