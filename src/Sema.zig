@@ -13071,7 +13071,14 @@ fn zirImport(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.
             const file_root_decl_index = result.file.root_decl.unwrap().?;
             return sema.analyzeDeclVal(block, operand_src, file_root_decl_index);
         },
-        .zon => return try mod.semaZon(result.file),
+        .zon => {
+            _ = result.file.getTree(mod.gpa) catch |err| {
+                // TODO: these errors are file system errors; make sure an update() will
+                // retry this and not cache the file system error, which may be transient.
+                return sema.fail(block, operand_src, "unable to open '{s}': {s}", .{ result.file.sub_file_path, @errorName(err) });
+            };
+            return try mod.semaZon(result.file);
+        }
     }
 }
 

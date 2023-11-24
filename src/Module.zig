@@ -3761,7 +3761,7 @@ const LowerZon = struct {
             );
         }
 
-        try self.mod.failed_files.putNoClobber(self.mod.gpa, self.file, err_msg);
+        try self.mod.failed_files.putNoClobber(gpa, self.file, err_msg);
         return error.AnalysisFail;
     }
 
