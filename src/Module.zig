@@ -3982,7 +3982,6 @@ const LowerZon = struct {
                 }
             },
             // XXX: test syntax errors too!
-            // XXX: okay so tree.errors gets populated, how do we report those?
             else => return self.fail(node, "expected ZON value", .{}),
         }
     }
