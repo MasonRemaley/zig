@@ -3765,7 +3765,6 @@ const LowerZon = struct {
         return error.AnalysisFail;
     }
 
-
     fn expr(self: *LowerZon, node: Ast.Node.Index) !InternPool.Index {
         const gpa = self.mod.gpa;
         const tags = self.file.tree.nodes.items(.tag);
@@ -3799,7 +3798,6 @@ const LowerZon = struct {
                 const number = std.zig.number_literal.parseNumberLiteral(token_bytes);
                 switch (number) {
                     .int => |unsigned| {
-                        const comptime_int_type = try self.mod.intern(.{ .simple_type = .comptime_int });
                         if (is_negative) {
                             const signed = std.math.negate(unsigned) catch {
                                 // XXX: test all cases...
@@ -3808,17 +3806,17 @@ const LowerZon = struct {
                                 defer result.deinit();
                                 result.negate();
                                 return self.mod.intern_pool.get(gpa, .{ .int = .{
-                                    .ty = comptime_int_type,
+                                    .ty = .comptime_int_type,
                                     .storage = .{ .big_int = result.toConst() },
                                 }});
                             };
                             return self.mod.intern_pool.get(gpa, .{ .int = .{
-                                .ty = comptime_int_type,
+                                .ty = .comptime_int_type,
                                 .storage = .{ .u64 = signed },
                             }});
                         } else {
                             return self.mod.intern_pool.get(gpa, .{ .int = .{
-                                .ty = comptime_int_type,
+                                .ty = .comptime_int_type,
                                 .storage = .{ .u64 = unsigned },
                             }});
                         }
@@ -3918,6 +3916,9 @@ const LowerZon = struct {
             .struct_init_comma => {
                 var buf: [2]Ast.Node.Index = undefined;
                 const struct_init = self.file.tree.fullStructInit(&buf, node).?;
+                if (struct_init.ast.type_expr != 0) {
+                    return self.fail(struct_init.ast.type_expr, "type expressions not allowed in ZON", .{});
+                }
                 const types = try gpa.alloc(InternPool.Index, struct_init.ast.fields.len);
                 defer gpa.free(types);
                 const values = try gpa.alloc(InternPool.Index, struct_init.ast.fields.len);
@@ -3952,10 +3953,14 @@ const LowerZon = struct {
                 // XXX: is this slow because it has to generate a name for each field for large arrays, or is that not an issue?
                 var buf: [2]Ast.Node.Index = undefined;
                 const array_init = self.file.tree.fullArrayInit(&buf, node).?;
+                if (array_init.ast.type_expr != 0) {
+                    return self.fail(array_init.ast.type_expr, "type expressions not allowed in ZON", .{});
+                }
                 const types = try gpa.alloc(InternPool.Index, array_init.ast.elements.len);
                 defer gpa.free(types);
                 const values = try gpa.alloc(InternPool.Index, array_init.ast.elements.len);
                 defer gpa.free(values);
+                // XXX: why array list? multiarraylist? or just do same way as above ones?
                 var names = try ArrayListUnmanaged(InternPool.NullTerminatedString).initCapacity(gpa, array_init.ast.elements.len);
                 defer names.deinit(gpa);
                 for (array_init.ast.elements, 0..) |element, i| {
@@ -3979,6 +3984,31 @@ const LowerZon = struct {
                     return .void_value;
                 } else {
                     unreachable;
+                }
+            },
+            .address_of => {
+                const data = self.file.tree.nodes.items(.data);
+                const child_node = data[node].lhs;
+                switch (tags[child_node]) {
+                    .array_init_one,
+                    .array_init_one_comma,
+                    .array_init_dot_two,
+                    .array_init_dot_two_comma,
+                    .array_init_dot,
+                    .array_init_dot_comma ,
+                    .array_init,
+                    .array_init_comma => {
+                        var value = try self.expr(child_node);
+                        return self.mod.intern_pool.get(gpa, .{ .ptr = .{
+                            .ty =  try self.mod.intern_pool.get(gpa, .{ .ptr_type = .{
+                                .child = self.mod.intern_pool.typeOf(value),
+                            }}),
+                            // XXX: it's not really a field, it's just a comptime value?
+                            .addr = .{ .comptime_field = value }
+                        }});
+
+                    },
+                    else => return self.fail(node, "expected ZON value", .{}),
                 }
             },
             // XXX: test syntax errors too!
