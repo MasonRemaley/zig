@@ -8,4 +8,4 @@ pub fn main() void {
 // output_mode=Exe
 // imports=zon/addr_num.zon
 //
-// \zon\addr_num.zon:2:14: error: invalid ZON value
+// zon\addr_num.zon:2:14: error: invalid ZON value

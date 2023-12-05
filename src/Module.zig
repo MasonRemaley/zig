@@ -3670,7 +3670,7 @@ const LowerZon = struct {
     // XXX: return error or return poisoned value?
     pub fn fail(
         self: *LowerZon,
-        node: Ast.Node.Index,
+        loc: LazySrcLoc,
         comptime format: []const u8,
         args: anytype,
     ) CompileError {
@@ -3680,7 +3680,7 @@ const LowerZon = struct {
         const src_loc = .{
             .file_scope = self.file,
             .parent_decl_node = 0,
-            .lazy = .{ .node_abs = node },
+            .lazy = loc,
         };
         const err_msg = try Module.ErrorMsg.create(self.mod.gpa, src_loc, format, args);
         try self.mod.failed_files.putNoClobber(self.mod.gpa, self.file, err_msg);
@@ -3781,7 +3781,7 @@ const LowerZon = struct {
                 } else if (std.mem.eql(u8, bytes, "null")) {
                     return .null_value;
                 } else {
-                    return self.fail(node, "use of unknown identifier '{s}'", .{ bytes });
+                    return self.fail(.{ .node_abs = node }, "use of unknown identifier '{s}'", .{ bytes });
                 }
             },
             .number_literal => {
@@ -3917,23 +3917,35 @@ const LowerZon = struct {
                 var buf: [2]Ast.Node.Index = undefined;
                 const struct_init = self.file.tree.fullStructInit(&buf, node).?;
                 if (struct_init.ast.type_expr != 0) {
-                    return self.fail(struct_init.ast.type_expr, "type expressions not allowed in ZON", .{});
+                    return self.fail(.{ .node_abs = struct_init.ast.type_expr }, "type expressions not allowed in ZON", .{});
                 }
                 const types = try gpa.alloc(InternPool.Index, struct_init.ast.fields.len);
                 defer gpa.free(types);
+
                 const values = try gpa.alloc(InternPool.Index, struct_init.ast.fields.len);
                 defer gpa.free(values);
-                const names = try gpa.alloc(InternPool.NullTerminatedString, struct_init.ast.fields.len);
-                defer gpa.free(names);
+
+                var names = std.AutoArrayHashMapUnmanaged(InternPool.NullTerminatedString, void){};
+                defer names.deinit(gpa);
+                try names.ensureTotalCapacity(gpa, struct_init.ast.fields.len);
+
                 for (struct_init.ast.fields, 0..) |field, i| {
                     values[i] = try self.expr(field);
                     types[i] = self.mod.intern_pool.typeOf(values[i]);
-                    // XXX: need to create or find a parseIdentifier like the runtime code that deals with @"" names
-                    names[i] = try self.mod.intern_pool.getOrPutString(gpa, self.file.tree.tokenSlice(self.file.tree.firstToken(field) - 2));
+
+                    // XXX: need to create or find a parseIdentifier like the runtime code that deals with @"" names, and make sure
+                    // dup fields aren't tripped up by it
+                    const name_token = self.file.tree.firstToken(field) - 2;
+                    const name = try self.mod.intern_pool.getOrPutString(gpa, self.file.tree.tokenSlice(name_token));
+                    const gop = names.getOrPutAssumeCapacity(name);
+                    if (gop.found_existing) {
+                        return self.fail(.{ .token_abs = name_token }, "duplicate field", .{});
+                    }
                 }
+
                 const struct_type = try self.mod.intern_pool.getAnonStructType(gpa, .{
                     .types = types,
-                    .names = names,
+                    .names = names.entries.items(.key),
                     .values = values,
                 });
                 return self.mod.intern_pool.get(gpa, .{ .aggregate = .{
@@ -3954,7 +3966,7 @@ const LowerZon = struct {
                 var buf: [2]Ast.Node.Index = undefined;
                 const array_init = self.file.tree.fullArrayInit(&buf, node).?;
                 if (array_init.ast.type_expr != 0) {
-                    return self.fail(array_init.ast.type_expr, "type expressions not allowed in ZON", .{});
+                    return self.fail(.{ .node_abs = array_init.ast.type_expr }, "type expressions not allowed in ZON", .{});
                 }
                 const types = try gpa.alloc(InternPool.Index, array_init.ast.elements.len);
                 defer gpa.free(types);
@@ -4008,10 +4020,10 @@ const LowerZon = struct {
                         }});
 
                     },
-                    else => return self.fail(node, "invalid ZON value", .{}),
+                    else => return self.fail(.{ .node_abs = node }, "invalid ZON value", .{}),
                 }
             },
-            else => return self.fail(node, "invalid ZON value", .{}),
+            else => return self.fail(.{ .node_abs = node }, "invalid ZON value", .{}),
         }
     }
 };
