@@ -4008,11 +4008,10 @@ const LowerZon = struct {
                         }});
 
                     },
-                    else => return self.fail(node, "expected ZON value", .{}),
+                    else => return self.fail(node, "invalid ZON value", .{}),
                 }
             },
-            // XXX: test syntax errors too!
-            else => return self.fail(node, "expected ZON value", .{}),
+            else => return self.fail(node, "invalid ZON value", .{}),
         }
     }
 };
