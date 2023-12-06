@@ -3859,6 +3859,23 @@ const LowerZon = struct {
                     .failure => unreachable, // XXX: error handling!
                 }
             },
+            .char_literal => {
+                // XXX: use sign...
+                const is_negative = tags[node] == .negation;
+                const num_lit_node = if (is_negative) b: {
+                    const data = self.file.tree.nodes.items(.data);
+                    break :b data[node].lhs;
+                } else node;
+
+                const main_tokens = self.file.tree.nodes.items(.main_token);
+                const num_lit_token = main_tokens[num_lit_node];
+                const token_bytes = self.file.tree.tokenSlice(num_lit_token);
+                const char = std.zig.string_literal.parseCharLiteral(token_bytes).success;
+                return self.mod.intern_pool.get(gpa, .{ .int = .{
+                    .ty = try self.mod.intern(.{ .simple_type = .comptime_int }),
+                    .storage = .{ .i64 = if (is_negative) -@as(i64, char) else char },
+                }});
+            },
             // XXX: make sure works with @""!
             .enum_literal => {
                 const main_tokens = self.file.tree.nodes.items(.main_token);
