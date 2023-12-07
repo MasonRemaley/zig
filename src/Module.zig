@@ -3767,6 +3767,7 @@ const LowerZon = struct {
 
     fn expr(self: *LowerZon, node: Ast.Node.Index) !InternPool.Index {
         const gpa = self.mod.gpa;
+        const data = self.file.tree.nodes.items(.data);
         const tags = self.file.tree.nodes.items(.tag);
         switch (tags[node]) {
             .identifier => {
@@ -3784,98 +3785,8 @@ const LowerZon = struct {
                     return self.fail(.{ .node_abs = node }, "use of unknown identifier '{s}'", .{ bytes });
                 }
             },
-            .number_literal => {
-                // XXX: use sign...
-                const is_negative = tags[node] == .negation;
-                const num_lit_node = if (is_negative) b: {
-                    const data = self.file.tree.nodes.items(.data);
-                    break :b data[node].lhs;
-                } else node;
-
-                const main_tokens = self.file.tree.nodes.items(.main_token);
-                const num_lit_token = main_tokens[num_lit_node];
-                const token_bytes = self.file.tree.tokenSlice(num_lit_token);
-                const number = std.zig.number_literal.parseNumberLiteral(token_bytes);
-                switch (number) {
-                    .int => |unsigned| {
-                        if (is_negative) {
-                            const signed = std.math.negate(unsigned) catch {
-                                // XXX: test all cases...
-                                // XXX: can I just always do this or is that worse for perf?
-                                var result = try std.math.big.int.Managed.initSet(gpa, unsigned);
-                                defer result.deinit();
-                                result.negate();
-                                return self.mod.intern_pool.get(gpa, .{ .int = .{
-                                    .ty = .comptime_int_type,
-                                    .storage = .{ .big_int = result.toConst() },
-                                }});
-                            };
-                            return self.mod.intern_pool.get(gpa, .{ .int = .{
-                                .ty = .comptime_int_type,
-                                .storage = .{ .u64 = signed },
-                            }});
-                        } else {
-                            return self.mod.intern_pool.get(gpa, .{ .int = .{
-                                .ty = .comptime_int_type,
-                                .storage = .{ .u64 = unsigned },
-                            }});
-                        }
-                    },
-                    // XXX: handle big ints at runtime too
-                    // XXX: any way to do big int math without allocating all args..?
-                    .big_int => |base| {
-                        // XXX: compare to `zirIntBig`, but I think that function only works because this logic was already done elsewhere.
-                        var base_managed = try std.math.big.int.Managed.initSet(gpa, @as(u8, @intFromEnum(base)));
-                        defer base_managed.deinit();
-                        const prefix_offset = @as(u8, 2) * @intFromBool(base != .decimal);
-                        var result = try std.math.big.int.Managed.init(gpa);
-                        defer result.deinit();
-                        for (token_bytes[prefix_offset..]) |char| {
-                            if (char == '_') continue;
-                            var d = try std.math.big.int.Managed.initSet(gpa, std.fmt.charToDigit(char, @intFromEnum(base)) catch unreachable);
-                            defer d.deinit();
-                            try result.mul(&result, &base_managed);
-                            if (is_negative) {
-                                try result.sub(&result, &d);
-                            } else {
-                                try result.add(&result, &d);
-                            }
-                        }
-                        return self.mod.intern_pool.get(gpa, .{ .int = .{
-                            .ty = try self.mod.intern(.{ .simple_type = .comptime_int }),
-                            .storage = .{ .big_int = result.toConst() },
-                        }});
-                    },
-                    // XXX: I think it's okay to ignore float base, parseFloat will handle it right?
-                    .float => {
-                        // XXX: always f128?
-                        const unsigned_float = std.fmt.parseFloat(f128, token_bytes) catch unreachable;
-                        const float = if (is_negative) -unsigned_float else unsigned_float;
-                        return try self.mod.intern(.{ .float = .{
-                            .ty = try self.mod.intern(.{ .simple_type = .comptime_float }),
-                            .storage = .{ .f128 = float },
-                        } });
-                    },
-                    .failure => unreachable, // XXX: error handling!
-                }
-            },
-            .char_literal => {
-                // XXX: use sign...
-                const is_negative = tags[node] == .negation;
-                const num_lit_node = if (is_negative) b: {
-                    const data = self.file.tree.nodes.items(.data);
-                    break :b data[node].lhs;
-                } else node;
-
-                const main_tokens = self.file.tree.nodes.items(.main_token);
-                const num_lit_token = main_tokens[num_lit_node];
-                const token_bytes = self.file.tree.tokenSlice(num_lit_token);
-                const char = std.zig.string_literal.parseCharLiteral(token_bytes).success;
-                return self.mod.intern_pool.get(gpa, .{ .int = .{
-                    .ty = try self.mod.intern(.{ .simple_type = .comptime_int }),
-                    .storage = .{ .i64 = if (is_negative) -@as(i64, char) else char },
-                }});
-            },
+            .number_literal, .char_literal => return self.number(node, false),
+            .negation => return self.number(data[node].lhs, true),
             // XXX: make sure works with @""!
             .enum_literal => {
                 const main_tokens = self.file.tree.nodes.items(.main_token);
@@ -4007,16 +3918,13 @@ const LowerZon = struct {
                     .storage = .{ .elems = values },
                 }});
             },
-            .block_two => {
-                const data = self.file.tree.nodes.items(.data);
-                if (data[node].lhs == 0 or data[node].rhs == 0) {
-                    return .void_value;
-                } else {
-                    unreachable;
-                }
+            .block_two => if (data[node].lhs == 0 or data[node].rhs == 0) {
+                return .void_value;
+            } else {
+                // XXX: why is this unreachable?
+                unreachable;
             },
             .address_of => {
-                const data = self.file.tree.nodes.items(.data);
                 const child_node = data[node].lhs;
                 switch (tags[child_node]) {
                     .array_init_one,
@@ -4067,6 +3975,101 @@ const LowerZon = struct {
         }
 
         return self.fail(.{ .node_abs = node }, "invalid ZON value", .{});
+    }
+
+    fn numberOrNegation(self: *LowerZon, node: Ast.Node.Index) !InternPool.Index {
+        const data = self.file.tree.nodes.items(.data);
+        const tags = self.file.tree.nodes.items(.tag);
+        switch (tags[node]) {
+            .negation => self.number(data[node].lhs, true),
+            _ => self.number(node, false),
+        }
+    }
+
+    fn number(self: *LowerZon, node: Ast.Node.Index, is_negative: bool) !InternPool.Index {
+        const gpa = self.mod.gpa;
+        const tags = self.file.tree.nodes.items(.tag);
+        switch (tags[node]) {
+            .char_literal => {
+                const main_tokens = self.file.tree.nodes.items(.main_token);
+                const token = main_tokens[node];
+                const token_bytes = self.file.tree.tokenSlice(token);
+                const char = std.zig.string_literal.parseCharLiteral(token_bytes).success;
+                return self.mod.intern_pool.get(gpa, .{ .int = .{
+                    .ty = try self.mod.intern(.{ .simple_type = .comptime_int }),
+                    .storage = .{ .i64 = if (is_negative) -@as(i64, char) else char },
+                }});
+            },
+            .number_literal => {
+                const main_tokens = self.file.tree.nodes.items(.main_token);
+                const token = main_tokens[node];
+                const token_bytes = self.file.tree.tokenSlice(token);
+                const parsed = std.zig.number_literal.parseNumberLiteral(token_bytes);
+                switch (parsed) {
+                    .int => |unsigned| {
+                        if (is_negative) {
+                            const signed = std.math.negate(unsigned) catch {
+                                // XXX: test all cases...
+                                // XXX: can I just always do this or is that worse for perf?
+                                var result = try std.math.big.int.Managed.initSet(gpa, unsigned);
+                                defer result.deinit();
+                                result.negate();
+                                return self.mod.intern_pool.get(gpa, .{ .int = .{
+                                    .ty = .comptime_int_type,
+                                    .storage = .{ .big_int = result.toConst() },
+                                }});
+                            };
+                            return self.mod.intern_pool.get(gpa, .{ .int = .{
+                                .ty = .comptime_int_type,
+                                .storage = .{ .u64 = signed },
+                            }});
+                        } else {
+                            return self.mod.intern_pool.get(gpa, .{ .int = .{
+                                .ty = .comptime_int_type,
+                                .storage = .{ .u64 = unsigned },
+                            }});
+                        }
+                    },
+                    // XXX: handle big ints at runtime too
+                    // XXX: any way to do big int math without allocating all args..?
+                    .big_int => |base| {
+                        // XXX: compare to `zirIntBig`, but I think that function only works because this logic was already done elsewhere.
+                        var base_managed = try std.math.big.int.Managed.initSet(gpa, @as(u8, @intFromEnum(base)));
+                        defer base_managed.deinit();
+                        const prefix_offset = @as(u8, 2) * @intFromBool(base != .decimal);
+                        var result = try std.math.big.int.Managed.init(gpa);
+                        defer result.deinit();
+                        for (token_bytes[prefix_offset..]) |char| {
+                            if (char == '_') continue;
+                            var d = try std.math.big.int.Managed.initSet(gpa, std.fmt.charToDigit(char, @intFromEnum(base)) catch unreachable);
+                            defer d.deinit();
+                            try result.mul(&result, &base_managed);
+                            if (is_negative) {
+                                try result.sub(&result, &d);
+                            } else {
+                                try result.add(&result, &d);
+                            }
+                        }
+                        return self.mod.intern_pool.get(gpa, .{ .int = .{
+                            .ty = try self.mod.intern(.{ .simple_type = .comptime_int }),
+                            .storage = .{ .big_int = result.toConst() },
+                        }});
+                    },
+                    // XXX: I think it's okay to ignore float base, parseFloat will handle it right?
+                    .float => {
+                        // XXX: always f128?
+                        const unsigned_float = std.fmt.parseFloat(f128, token_bytes) catch unreachable;
+                        const float = if (is_negative) -unsigned_float else unsigned_float;
+                        return try self.mod.intern(.{ .float = .{
+                            .ty = try self.mod.intern(.{ .simple_type = .comptime_float }),
+                            .storage = .{ .f128 = float },
+                        } });
+                    },
+                    .failure => unreachable, // XXX: error handling!
+                }
+            },
+            else => unreachable,
+        }
     }
 };
 
