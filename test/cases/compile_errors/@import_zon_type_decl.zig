@@ -8,4 +8,4 @@ pub fn main() void {
 // output_mode=Exe
 // imports=zon/type_decl.zon
 //
-// zon\type_decl.zon:2:12: error: invalid ZON value
+// type_decl.zon:2:12: error: invalid ZON value

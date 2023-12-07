@@ -9,4 +9,4 @@ pub fn main() void {
 // output_mode=Exe
 // imports=zon/struct_dup_field.zon
 //
-// zon\struct_dup_field.zon:3:6: error: duplicate field
+// struct_dup_field.zon:3:6: error: duplicate field

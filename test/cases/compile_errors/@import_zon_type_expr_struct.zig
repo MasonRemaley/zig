@@ -8,4 +8,4 @@ pub fn main() void {
 // output_mode=Exe
 // imports=zon/type_expr_struct.zon
 //
-// zon\type_expr_struct.zon:1:1: error: type expressions not allowed in ZON
+// type_expr_struct.zon:1:1: error: type expressions not allowed in ZON

@@ -3799,14 +3799,89 @@ const LowerZon = struct {
             .string_literal => {
                 const main_tokens = self.file.tree.nodes.items(.main_token);
                 const token = main_tokens[node];
-                const raw = self.file.tree.tokenSlice(token);
+                const raw_string = self.file.tree.tokenSlice(token);
 
                 var bytes = std.ArrayListUnmanaged(u8){};
                 defer bytes.deinit(gpa);
 
-                switch (try std.zig.string_literal.parseWrite(bytes.writer(gpa), raw)) {
+                const offset = self.file.tree.tokens.items(.start)[token];
+                switch (try std.zig.string_literal.parseWrite(bytes.writer(gpa), raw_string)) {
                     .success => {},
-                    .failure => unreachable, // XXX: error handling
+                    .failure => |err| switch (err) {
+                        .invalid_escape_character => |bad_index| {
+                            return self.fail(
+                                .{ .byte_abs = offset + @as(u32, @intCast(bad_index)) },
+                                "invalid escape character: '{c}'",
+                                .{raw_string[bad_index]},
+                            );
+                        },
+                        // XXX: ...
+                        else => unreachable,
+                        // .expected_hex_digit => |bad_index| {
+                        //     return astgen.failOff(
+                        //         token,
+                        //         offset + @as(u32, @intCast(bad_index)),
+                        //         "expected hex digit, found '{c}'",
+                        //         .{raw_string[bad_index]},
+                        //     );
+                        // },
+                        // .empty_unicode_escape_sequence => |bad_index| {
+                        //     return astgen.failOff(
+                        //         token,
+                        //         offset + @as(u32, @intCast(bad_index)),
+                        //         "empty unicode escape sequence",
+                        //         .{},
+                        //     );
+                        // },
+                        // .expected_hex_digit_or_rbrace => |bad_index| {
+                        //     return astgen.failOff(
+                        //         token,
+                        //         offset + @as(u32, @intCast(bad_index)),
+                        //         "expected hex digit or '}}', found '{c}'",
+                        //         .{raw_string[bad_index]},
+                        //     );
+                        // },
+                        // .invalid_unicode_codepoint => |bad_index| {
+                        //     return astgen.failOff(
+                        //         token,
+                        //         offset + @as(u32, @intCast(bad_index)),
+                        //         "unicode escape does not correspond to a valid codepoint",
+                        //         .{},
+                        //     );
+                        // },
+                        // .expected_lbrace => |bad_index| {
+                        //     return astgen.failOff(
+                        //         token,
+                        //         offset + @as(u32, @intCast(bad_index)),
+                        //         "expected '{{', found '{c}",
+                        //         .{raw_string[bad_index]},
+                        //     );
+                        // },
+                        // .expected_rbrace => |bad_index| {
+                        //     return astgen.failOff(
+                        //         token,
+                        //         offset + @as(u32, @intCast(bad_index)),
+                        //         "expected '}}', found '{c}",
+                        //         .{raw_string[bad_index]},
+                        //     );
+                        // },
+                        // .expected_single_quote => |bad_index| {
+                        //     return astgen.failOff(
+                        //         token,
+                        //         offset + @as(u32, @intCast(bad_index)),
+                        //         "expected single quote ('), found '{c}",
+                        //         .{raw_string[bad_index]},
+                        //     );
+                        // },
+                        // .invalid_character => |bad_index| {
+                        //     return astgen.failOff(
+                        //         token,
+                        //         offset + @as(u32, @intCast(bad_index)),
+                        //         "invalid byte in string or character literal: '{c}'",
+                        //         .{raw_string[bad_index]},
+                        //     );
+                        // },
+                    }
                 }
 
                 const array_ty = try self.mod.arrayType(.{

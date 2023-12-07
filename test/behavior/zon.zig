@@ -25,7 +25,6 @@ test "optional" {
     try expectEqual(none, @import("zon/none.zon"));
 }
 
-// XXX: have error tests for coercing to structs with fields that don't match?
 test "union" {
     const Union = union {
         x: f32,
@@ -65,10 +64,10 @@ test "tuple" {
     try expectEqualDeep(.{ 1.2, true, "hello", 3 }, @import("zon/tuple.zon"));
 }
 
-// XXX: negative chars? do we test this at runtime? do we support it at both?
 test "char" {
     try expectEqual('a', @import("zon/a.zon"));
     try expectEqual('z', @import("zon/z.zon"));
+    try expectEqual(-'a', @import("zon/a_neg.zon"));
 }
 
 test "arrays" {
@@ -77,7 +76,6 @@ test "arrays" {
     try expectEqual([4:2]u8{ 'a', 'b', 'c', 'd' }, @import("zon/array.zon"));
 }
 
-// XXX: have tests for slice lengths not lining up and wrong inner types, and mixing arrays and slices?
 test "slices" {
     try expectEqualSlices(u8, &.{}, @import("zon/slice-empty.zon"));
     try expectEqualSlices(u8, &.{ 'a', 'b', 'c' }, @import("zon/slice-abc.zon"));
@@ -88,7 +86,6 @@ test "string literals" {
     try expectEqualDeep("ab\\c", @import("zon/abc-escaped.zon"));
     const zero_terminated: [:0]const u8 = @import("zon/abc.zon");
     try expectEqualDeep(zero_terminated, "abc");
-    // XXX: test invalid string literals, e.g. \"\\a\"
 }
 
 test "enum literals" {
@@ -100,7 +97,7 @@ test "enum literals" {
     try expectEqual(Enum.foo, @import("zon/foo.zon"));
 }
 
-// XXX: test integer limits? failing to parse as an int?
+// XXX: test integer limits? failing to parse as an int? (see runtime tests)
 test "int" {
     const expected = .{
         // Test various numbers and types

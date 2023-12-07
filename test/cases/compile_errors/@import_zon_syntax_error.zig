@@ -8,4 +8,4 @@ pub fn main() void {
 // output_mode=Exe
 // imports=zon/syntax_error.zon
 //
-// zon\syntax_error.zon:3:13: error: expected ',' after initializer
+// syntax_error.zon:3:13: error: expected ',' after initializer
