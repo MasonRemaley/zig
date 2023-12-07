@@ -4027,7 +4027,7 @@ const LowerZon = struct {
                     .array_init_dot_comma ,
                     .array_init,
                     .array_init_comma => {
-                        var value = try self.expr(child_node);
+                        const value = try self.expr(child_node);
                         return self.mod.intern_pool.get(gpa, .{ .ptr = .{
                             .ty =  try self.mod.intern_pool.get(gpa, .{ .ptr_type = .{
                                 .child = self.mod.intern_pool.typeOf(value),
@@ -4037,11 +4037,36 @@ const LowerZon = struct {
                         }});
 
                     },
-                    else => return self.fail(.{ .node_abs = node }, "invalid ZON value", .{}),
+                    // XXX: hmm we could remove possibility of type expressions by just not allowing those tags actually
+                    .struct_init_one,
+                    .struct_init_one_comma,
+                    .struct_init_dot_two,
+                    .struct_init_dot_two_comma,
+                    .struct_init_dot,
+                    .struct_init_dot_comma,
+                    .struct_init,
+                    .struct_init_comma,
+                    => {
+                        var buf: [2]Ast.Node.Index = undefined;
+                        const full = self.file.tree.fullStructInit(&buf, child_node).?.ast.fields;
+                        if (full.len == 0) {
+                            const value = .empty_struct;
+                            return self.mod.intern_pool.get(gpa, .{ .ptr = .{
+                                .ty =  try self.mod.intern_pool.get(gpa, .{ .ptr_type = .{
+                                    .child = self.mod.intern_pool.typeOf(value),
+                                }}),
+                                // XXX: it's not really a field, it's just a comptime value?
+                                .addr = .{ .comptime_field = value }
+                            }});
+                        }
+                    },
+                    else => {}
                 }
             },
-            else => return self.fail(.{ .node_abs = node }, "invalid ZON value", .{}),
+            else => {}
         }
+
+        return self.fail(.{ .node_abs = node }, "invalid ZON value", .{});
     }
 };
 
