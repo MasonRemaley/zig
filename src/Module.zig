@@ -3890,7 +3890,6 @@ const LowerZon = struct {
             .array_init,
             .array_init_comma => {
                 // XXX: Ast.full.ContainerField?
-                // XXX: is this slow because it has to generate a name for each field for large arrays, or is that not an issue?
                 var buf: [2]Ast.Node.Index = undefined;
                 const array_init = self.file.tree.fullArrayInit(&buf, node).?;
                 if (array_init.ast.type_expr != 0) {
@@ -3900,17 +3899,13 @@ const LowerZon = struct {
                 defer gpa.free(types);
                 const values = try gpa.alloc(InternPool.Index, array_init.ast.elements.len);
                 defer gpa.free(values);
-                // XXX: why array list? multiarraylist? or just do same way as above ones?
-                var names = try ArrayListUnmanaged(InternPool.NullTerminatedString).initCapacity(gpa, array_init.ast.elements.len);
-                defer names.deinit(gpa);
                 for (array_init.ast.elements, 0..) |element, i| {
                     values[i] = try self.expr(element);
                     types[i] = self.mod.intern_pool.typeOf(values[i]);
-                    names.appendAssumeCapacity(try self.mod.intern_pool.getOrPutString(gpa, try std.fmt.allocPrint(gpa, "{}", .{i})));
                 }
                 const tuple_type = try self.mod.intern_pool.getAnonStructType(gpa, .{
                     .types = types,
-                    .names = names.items,
+                    .names = &.{},
                     .values = values,
                 });
                 return self.mod.intern_pool.get(gpa, .{ .aggregate = .{
@@ -3936,12 +3931,13 @@ const LowerZon = struct {
                     .array_init,
                     .array_init_comma => {
                         const value = try self.expr(child_node);
+                        const ty = try self.mod.intern_pool.get(gpa, .{ .ptr_type = .{
+                            .child = self.mod.intern_pool.typeOf(value),
+                        }});
                         return self.mod.intern_pool.get(gpa, .{ .ptr = .{
-                            .ty =  try self.mod.intern_pool.get(gpa, .{ .ptr_type = .{
-                                .child = self.mod.intern_pool.typeOf(value),
-                            }}),
-                            // XXX: it's not really a field, it's just a comptime value?
-                            .addr = .{ .comptime_field = value }
+                            .ty = ty,
+                            // XXX: is anon decl correct? (see other use  of this too below)
+                            .addr = .{ .anon_decl = .{ .orig_ty = ty, .val = value } }
                         }});
 
                     },
@@ -3959,12 +3955,12 @@ const LowerZon = struct {
                         const full = self.file.tree.fullStructInit(&buf, child_node).?.ast.fields;
                         if (full.len == 0) {
                             const value = .empty_struct;
+                            const ty = try self.mod.intern_pool.get(gpa, .{ .ptr_type = .{
+                                .child = self.mod.intern_pool.typeOf(value),
+                            }});
                             return self.mod.intern_pool.get(gpa, .{ .ptr = .{
-                                .ty =  try self.mod.intern_pool.get(gpa, .{ .ptr_type = .{
-                                    .child = self.mod.intern_pool.typeOf(value),
-                                }}),
-                                // XXX: it's not really a field, it's just a comptime value?
-                                .addr = .{ .comptime_field = value }
+                                .ty = ty,
+                                .addr = .{ .anon_decl = .{ .orig_ty = ty, .val = value } }
                             }});
                         }
                     },

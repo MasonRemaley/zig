@@ -1,6 +1,8 @@
 const std = @import("std");
+
 const expectEqual = std.testing.expectEqual;
 const expectEqualDeep = std.testing.expectEqualDeep;
+const expectEqualSlices = std.testing.expectEqualSlices;
 
 test "void" {
     try expectEqual({}, @import("zon/void.zon"));
@@ -70,42 +72,15 @@ test "char" {
 }
 
 test "arrays" {
-    const empty = [0]u8{};
-    try expectEqual(empty, @import("zon/vec0.zon"));
-
-    // Normal arrays
-    {
-        // XXX: this multi step cast is very unfortunate...
-        const array = [4]u8{ 'a', 'b', 'c', 'd' };
-        const imported: struct { u8, u8, u8, u8 } = @import("zon/array.zon");
-        const imported_u8s: [4]u8 = imported;
-        try expectEqual(array, imported_u8s);
-    }
-
-    // Sentinels
-    {
-        const abc: [4:2]u8 = .{ 'a', 'b', 'c', 'd' };
-        const zon_abc: struct { u8, u8, u8, u8 } = @import("zon/array.zon");
-        const zon_abc_slice: [4:2]u8 = zon_abc;
-        try expectEqual(abc, zon_abc_slice);
-    }
+    try expectEqual([0]u8{}, @import("zon/vec0.zon"));
+    try expectEqual([4]u8{ 'a', 'b', 'c', 'd' }, @import("zon/array.zon"));
+    try expectEqual([4:2]u8{ 'a', 'b', 'c', 'd' }, @import("zon/array.zon"));
 }
 
 // XXX: have tests for slice lengths not lining up and wrong inner types, and mixing arrays and slices?
-// XXX: this casting also very unfortunate...
 test "slices" {
-    // XXX: this one we can't  even cast...
-    // Empty
-    const expected: *const struct {} = &.{};
-    try expectEqual(expected, @import("zon/slice-empty.zon"));
-
-    // Slice
-    {
-        const abc: []const u8 = &.{ 'a', 'b', 'c' };
-        const zon_abc: *const struct { u8, u8, u8 } = @import("zon/slice-abc.zon");
-        const zon_abc_slice: []const u8 = zon_abc;
-        try expectEqual(abc, zon_abc_slice);
-    }
+    try expectEqualSlices(u8, &.{}, @import("zon/slice-empty.zon"));
+    try expectEqualSlices(u8, &.{ 'a', 'b', 'c' }, @import("zon/slice-abc.zon"));
 }
 
 test "string literals" {
