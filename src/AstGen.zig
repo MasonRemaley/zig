@@ -7599,7 +7599,7 @@ fn charLiteral(gz: *GenZir, ri: ResultInfo, node: Ast.Node.Index) InnerError!Zir
             const result = try gz.addInt(codepoint);
             return rvalue(gz, ri, result, node);
         },
-        .failure => |err| return astgen.failWithStrLitError(err, main_token, slice, 0),
+        .failure => |err| return astgen.failWithStrLitError(failOff, err, main_token, slice, 0),
     }
 }
 
@@ -10302,15 +10302,23 @@ fn parseStrLit(
     buf.* = buf_managed.moveToUnmanaged();
     switch (try result) {
         .success => return,
-        .failure => |err| return astgen.failWithStrLitError(err, token, bytes, offset),
+        .failure => |err| return astgen.failWithStrLitError(failOff, err, token, bytes, offset),
     }
 }
 
-fn failWithStrLitError(astgen: *AstGen, err: std.zig.string_literal.Error, token: Ast.TokenIndex, bytes: []const u8, offset: u32) InnerError {
+pub fn failWithStrLitError(
+    self: anytype,
+    comptime fail: anytype,
+    err: std.zig.string_literal.Error,
+    token: Ast.TokenIndex,
+    bytes: []const u8,
+    offset: u32,
+) (@typeInfo(@TypeOf(fail)).Fn.return_type orelse void) {
     const raw_string = bytes[offset..];
     switch (err) {
         .invalid_escape_character => |bad_index| {
-            return astgen.failOff(
+            return fail(
+                self,
                 token,
                 offset + @as(u32, @intCast(bad_index)),
                 "invalid escape character: '{c}'",
@@ -10318,7 +10326,8 @@ fn failWithStrLitError(astgen: *AstGen, err: std.zig.string_literal.Error, token
             );
         },
         .expected_hex_digit => |bad_index| {
-            return astgen.failOff(
+            return fail(
+                self,
                 token,
                 offset + @as(u32, @intCast(bad_index)),
                 "expected hex digit, found '{c}'",
@@ -10326,7 +10335,8 @@ fn failWithStrLitError(astgen: *AstGen, err: std.zig.string_literal.Error, token
             );
         },
         .empty_unicode_escape_sequence => |bad_index| {
-            return astgen.failOff(
+            return fail(
+                self,
                 token,
                 offset + @as(u32, @intCast(bad_index)),
                 "empty unicode escape sequence",
@@ -10334,7 +10344,8 @@ fn failWithStrLitError(astgen: *AstGen, err: std.zig.string_literal.Error, token
             );
         },
         .expected_hex_digit_or_rbrace => |bad_index| {
-            return astgen.failOff(
+            return fail(
+                self,
                 token,
                 offset + @as(u32, @intCast(bad_index)),
                 "expected hex digit or '}}', found '{c}'",
@@ -10342,7 +10353,8 @@ fn failWithStrLitError(astgen: *AstGen, err: std.zig.string_literal.Error, token
             );
         },
         .invalid_unicode_codepoint => |bad_index| {
-            return astgen.failOff(
+            return fail(
+                self,
                 token,
                 offset + @as(u32, @intCast(bad_index)),
                 "unicode escape does not correspond to a valid codepoint",
@@ -10350,7 +10362,8 @@ fn failWithStrLitError(astgen: *AstGen, err: std.zig.string_literal.Error, token
             );
         },
         .expected_lbrace => |bad_index| {
-            return astgen.failOff(
+            return fail(
+                self,
                 token,
                 offset + @as(u32, @intCast(bad_index)),
                 "expected '{{', found '{c}",
@@ -10358,7 +10371,8 @@ fn failWithStrLitError(astgen: *AstGen, err: std.zig.string_literal.Error, token
             );
         },
         .expected_rbrace => |bad_index| {
-            return astgen.failOff(
+            return fail(
+                self,
                 token,
                 offset + @as(u32, @intCast(bad_index)),
                 "expected '}}', found '{c}",
@@ -10366,7 +10380,8 @@ fn failWithStrLitError(astgen: *AstGen, err: std.zig.string_literal.Error, token
             );
         },
         .expected_single_quote => |bad_index| {
-            return astgen.failOff(
+            return fail(
+                self,
                 token,
                 offset + @as(u32, @intCast(bad_index)),
                 "expected single quote ('), found '{c}",
@@ -10374,7 +10389,8 @@ fn failWithStrLitError(astgen: *AstGen, err: std.zig.string_literal.Error, token
             );
         },
         .invalid_character => |bad_index| {
-            return astgen.failOff(
+            return fail(
+                self,
                 token,
                 offset + @as(u32, @intCast(bad_index)),
                 "invalid byte in string or character literal: '{c}'",

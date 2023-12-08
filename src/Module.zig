@@ -3687,6 +3687,16 @@ const LowerZon = struct {
         return error.AnalysisFail;
     }
 
+    pub fn failWithStrLitError(
+        self: *LowerZon,
+        _: Ast.TokenIndex,
+        byte_abs: u32,
+        comptime format: []const u8,
+        args: anytype,
+    ) CompileError {
+        return self.fail(.{ .byte_abs = byte_abs }, format, args);
+    }
+
     fn lower(self: *LowerZon) !InternPool.Index {
         const tree = self.file.getTree(self.mod.gpa) catch unreachable;
         if (tree.errors.len != 0) {
@@ -3807,81 +3817,14 @@ const LowerZon = struct {
                 const offset = self.file.tree.tokens.items(.start)[token];
                 switch (try std.zig.string_literal.parseWrite(bytes.writer(gpa), raw_string)) {
                     .success => {},
-                    .failure => |err| switch (err) {
-                        .invalid_escape_character => |bad_index| {
-                            return self.fail(
-                                .{ .byte_abs = offset + @as(u32, @intCast(bad_index)) },
-                                "invalid escape character: '{c}'",
-                                .{raw_string[bad_index]},
-                            );
-                        },
-                        // XXX: ...
-                        else => unreachable,
-                        // .expected_hex_digit => |bad_index| {
-                        //     return astgen.failOff(
-                        //         token,
-                        //         offset + @as(u32, @intCast(bad_index)),
-                        //         "expected hex digit, found '{c}'",
-                        //         .{raw_string[bad_index]},
-                        //     );
-                        // },
-                        // .empty_unicode_escape_sequence => |bad_index| {
-                        //     return astgen.failOff(
-                        //         token,
-                        //         offset + @as(u32, @intCast(bad_index)),
-                        //         "empty unicode escape sequence",
-                        //         .{},
-                        //     );
-                        // },
-                        // .expected_hex_digit_or_rbrace => |bad_index| {
-                        //     return astgen.failOff(
-                        //         token,
-                        //         offset + @as(u32, @intCast(bad_index)),
-                        //         "expected hex digit or '}}', found '{c}'",
-                        //         .{raw_string[bad_index]},
-                        //     );
-                        // },
-                        // .invalid_unicode_codepoint => |bad_index| {
-                        //     return astgen.failOff(
-                        //         token,
-                        //         offset + @as(u32, @intCast(bad_index)),
-                        //         "unicode escape does not correspond to a valid codepoint",
-                        //         .{},
-                        //     );
-                        // },
-                        // .expected_lbrace => |bad_index| {
-                        //     return astgen.failOff(
-                        //         token,
-                        //         offset + @as(u32, @intCast(bad_index)),
-                        //         "expected '{{', found '{c}",
-                        //         .{raw_string[bad_index]},
-                        //     );
-                        // },
-                        // .expected_rbrace => |bad_index| {
-                        //     return astgen.failOff(
-                        //         token,
-                        //         offset + @as(u32, @intCast(bad_index)),
-                        //         "expected '}}', found '{c}",
-                        //         .{raw_string[bad_index]},
-                        //     );
-                        // },
-                        // .expected_single_quote => |bad_index| {
-                        //     return astgen.failOff(
-                        //         token,
-                        //         offset + @as(u32, @intCast(bad_index)),
-                        //         "expected single quote ('), found '{c}",
-                        //         .{raw_string[bad_index]},
-                        //     );
-                        // },
-                        // .invalid_character => |bad_index| {
-                        //     return astgen.failOff(
-                        //         token,
-                        //         offset + @as(u32, @intCast(bad_index)),
-                        //         "invalid byte in string or character literal: '{c}'",
-                        //         .{raw_string[bad_index]},
-                        //     );
-                        // },
-                    }
+                    .failure => |err| return AstGen.failWithStrLitError(
+                        self,
+                        failWithStrLitError,
+                        err,
+                        token,
+                        raw_string,
+                        offset,
+                    ),
                 }
 
                 const array_ty = try self.mod.arrayType(.{
@@ -4065,7 +4008,17 @@ const LowerZon = struct {
                 const main_tokens = self.file.tree.nodes.items(.main_token);
                 const token = main_tokens[node];
                 const token_bytes = self.file.tree.tokenSlice(token);
-                const char = std.zig.string_literal.parseCharLiteral(token_bytes).success;
+                const char = switch (std.zig.string_literal.parseCharLiteral(token_bytes)) {
+                    .success => |char| char,
+                    .failure => |err| return AstGen.failWithStrLitError(
+                        self,
+                        failWithStrLitError,
+                        err,
+                        token,
+                        token_bytes,
+                        0,
+                    ),
+                };
                 return self.mod.intern_pool.get(gpa, .{ .int = .{
                     .ty = try self.mod.intern(.{ .simple_type = .comptime_int }),
                     .storage = .{ .i64 = if (is_negative) -@as(i64, char) else char },
