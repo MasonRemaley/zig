@@ -3673,7 +3673,7 @@ const LowerZon = struct {
         loc: LazySrcLoc,
         comptime format: []const u8,
         args: anytype,
-    ) CompileError {
+    ) (Allocator.Error || error { AnalysisFail }) {
         // XXX: good idea?
         @setCold(true);
 
@@ -3693,8 +3693,33 @@ const LowerZon = struct {
         byte_abs: u32,
         comptime format: []const u8,
         args: anytype,
-    ) CompileError {
+    ) (Allocator.Error || error { AnalysisFail }) {
         return self.fail(.{ .byte_abs = byte_abs }, format, args);
+    }
+
+    fn numberError(
+        self: *LowerZon,
+        _: Ast.TokenIndex,
+        byte_abs: u32,
+        comptime format: []const u8,
+        args: anytype,
+        notes: []const u32,
+    ) Allocator.Error!void {
+        // XXX: use notes...
+        _ = notes;
+        switch (self.fail(.{ .byte_abs = byte_abs }, format, args)) {
+            error.AnalysisFail => {},
+            else => |err| return err,
+        }
+    }
+
+    // XXX: ...
+    fn errNote(self: *LowerZon, token: Ast.TokenIndex, comptime format: []const u8, args: anytype) Allocator.Error!u32 {
+        _ = self;
+        _ = token;
+        _ = format;
+        _ = args;
+        return 0;
     }
 
     fn lower(self: *LowerZon) !InternPool.Index {
@@ -3708,7 +3733,7 @@ const LowerZon = struct {
         return self.expr(root);
     }
 
-    // XXX: can any of this be pulled out from AstGen.lowerAstErrors into a common function?
+    // XXX: is compileError correct here..? can any of this be pulled out from AstGen.lowerAstErrors into a common function?
     fn lowerAstErrors(self: *LowerZon) CompileError {
         const tree = self.file.tree;
         assert(tree.errors.len > 0);
@@ -4089,7 +4114,15 @@ const LowerZon = struct {
                             .storage = .{ .f128 = float },
                         } });
                     },
-                    .failure => unreachable, // XXX: error handling!
+                    // XXX: ...
+                    .failure => |err| return AstGen.failWithNumberError(
+                        self,
+                        numberError,
+                        errNote,
+                        err,
+                        token,
+                        token_bytes,
+                    ),
                 }
             },
             else => unreachable,

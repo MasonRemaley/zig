@@ -97,7 +97,6 @@ test "enum literals" {
     try expectEqual(Enum.foo, @import("zon/foo.zon"));
 }
 
-// XXX: test integer limits? failing to parse as an int? (see runtime tests)
 test "int" {
     const expected = .{
         // Test various numbers and types
