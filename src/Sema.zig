@@ -189,6 +189,7 @@ const InternPool = @import("InternPool.zig");
 const Alignment = InternPool.Alignment;
 const AnalUnit = InternPool.AnalUnit;
 const ComptimeAllocIndex = InternPool.ComptimeAllocIndex;
+const zon = @import("zon.zig");
 
 pub const default_branch_quota = 1000;
 pub const default_reference_trace_len = 2;
@@ -13981,9 +13982,22 @@ fn zirImport(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.
             return sema.fail(block, operand_src, "unable to open '{s}': {s}", .{ operand, @errorName(err) });
         },
     };
-    try pt.ensureFileAnalyzed(result.file_index);
-    const file_root_decl_index = zcu.fileRootDecl(result.file_index).unwrap().?;
-    return sema.analyzeDeclVal(block, operand_src, file_root_decl_index);
+    switch (result.file.mode) {
+        .zig => {
+            try pt.ensureFileAnalyzed(result.file_index);
+            const file_root_decl_index = zcu.fileRootDecl(result.file_index).unwrap().?;
+            return sema.analyzeDeclVal(block, operand_src, file_root_decl_index);
+        },
+        .zon => {
+            _ = result.file.getTree(mod.gpa) catch |err| {
+                // TODO: these errors are file system errors; make sure an update() will
+                // retry this and not cache the file system error, which may be transient.
+                return sema.fail(block, operand_src, "unable to open '{s}': {s}", .{ result.file.sub_file_path, @errorName(err) });
+            };
+            const interned = try zon.lower(mod, result.file);
+            return Air.internedToRef(interned);
+        },
+    }
 }
 
 fn zirEmbedFile(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Inst.Ref {
