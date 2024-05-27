@@ -3677,7 +3677,7 @@ const LowerZon = struct {
                 const bytes = self.ident(token);
 
                 const Ident = enum { true, false, null, nan, inf };
-                const values = std.ComptimeStringMap(Ident, .{
+                const values = std.StaticStringMap(Ident).initComptime(.{
                     .{ "true", .true },
                     .{ "false", .false },
                     .{ "null", .null },
@@ -3707,7 +3707,8 @@ const LowerZon = struct {
                 const token = main_tokens[node];
                 const bytes = self.ident(token);
                 return self.mod.intern_pool.get(gpa, .{
-                    .enum_literal = try self.mod.intern_pool.getOrPutString(gpa, bytes),
+                    // XXX: string literals can't have embedded nulls right?
+                    .enum_literal = try self.mod.intern_pool.getOrPutString(gpa, bytes, .no_embedded_nulls),
                 });
             },
             .string_literal => {
@@ -3739,7 +3740,8 @@ const LowerZon = struct {
                 });
                 const val = try self.mod.intern(.{ .aggregate = .{
                     .ty = array_ty.toIntern(),
-                    .storage = .{ .bytes = bytes.items },
+                    // XXX: could have embedded nulls right?
+                    .storage = .{ .bytes = try self.mod.intern_pool.getOrPutString(gpa, bytes.items, .maybe_embedded_nulls) },
                 } });
                 const ptr_ty = (try self.mod.ptrType(.{
                     .child = array_ty.toIntern(),
@@ -3751,30 +3753,32 @@ const LowerZon = struct {
                 })).toIntern();
                 return try self.mod.intern(.{ .ptr = .{
                     .ty = ptr_ty,
-                    .addr = .{ .anon_decl = .{ .val = val, .orig_ty = ptr_ty } },
+                    .base_addr = .{ .anon_decl = .{ .val = val, .orig_ty = ptr_ty } },
+                    .byte_offset = 0,
                 } });
             },
             .multiline_string_literal => {
-                var string_bytes = std.ArrayListUnmanaged(u8){};
-                defer string_bytes.deinit(gpa);
+                var bytes = std.ArrayListUnmanaged(u8){};
+                defer bytes.deinit(gpa);
                 
-                var parser = std.zig.string_literal.multilineParser(string_bytes.writer(gpa));
+                var parser = std.zig.string_literal.multilineParser(bytes.writer(gpa));
                 var tok_i = data[node].lhs;
                 while (tok_i <= data[node].rhs) : (tok_i += 1) {
                     try parser.line(self.file.tree.tokenSlice(tok_i));
                 }
 
-                const len = string_bytes.items.len;
-                try string_bytes.append(gpa, 0);
+                const len = bytes.items.len;
+                try bytes.append(gpa, 0);
 
                 const array_ty = try self.mod.arrayType(.{
-                    .len = len,
+                    .len = len, // XXX: why len before 0 when we say it's null terminated?
                     .sentinel = .zero_u8,
                     .child = .u8_type
                 });
                 const val = try self.mod.intern(.{ .aggregate = .{
                     .ty = array_ty.toIntern(),
-                    .storage = .{ .bytes = string_bytes.items },
+                // XXX: could have embedded nulls right?
+                    .storage = .{ .bytes = try self.mod.intern_pool.getOrPutString(gpa, bytes.items, .maybe_embedded_nulls) },
                 } });
                 const ptr_ty = (try self.mod.ptrType(.{
                     .child = array_ty.toIntern(),
@@ -3786,7 +3790,8 @@ const LowerZon = struct {
                 })).toIntern();
                 return try self.mod.intern(.{ .ptr = .{
                     .ty = ptr_ty,
-                    .addr = .{ .anon_decl = .{ .val = val, .orig_ty = ptr_ty } },
+                    .base_addr = .{ .anon_decl = .{ .val = val, .orig_ty = ptr_ty } },
+                    .byte_offset = 0,
                 } });
             },
             .struct_init_one,
@@ -3817,7 +3822,8 @@ const LowerZon = struct {
                     types[i] = self.mod.intern_pool.typeOf(values[i]);
 
                     const name_token = self.file.tree.firstToken(field) - 2;
-                    const name = try self.mod.intern_pool.getOrPutString(gpa, self.ident(name_token));
+                    // XXX: can't be null right?
+                    const name = try self.mod.intern_pool.getOrPutString(gpa, self.ident(name_token), .no_embedded_nulls);
                     const gop = names.getOrPutAssumeCapacity(name);
                     if (gop.found_existing) {
                         return self.fail(.{ .token_abs = name_token }, "duplicate field", .{});
@@ -3889,7 +3895,8 @@ const LowerZon = struct {
                         return self.mod.intern_pool.get(gpa, .{ .ptr = .{
                             .ty = ty,
                             // XXX: is anon decl correct? (see other use  of this too below)
-                            .addr = .{ .anon_decl = .{ .orig_ty = ty, .val = value } }
+                            .base_addr = .{ .anon_decl = .{ .orig_ty = ty, .val = value } },
+                            .byte_offset = 0,
                         }});
 
                     },
@@ -3911,7 +3918,8 @@ const LowerZon = struct {
                             }});
                             return self.mod.intern_pool.get(gpa, .{ .ptr = .{
                                 .ty = ty,
-                                .addr = .{ .anon_decl = .{ .orig_ty = ty, .val = value } }
+                                .base_addr = .{ .anon_decl = .{ .orig_ty = ty, .val = value } },
+                                .byte_offset = 0,
                             }});
                         }
                     },
@@ -4039,7 +4047,7 @@ const LowerZon = struct {
                 const token = main_tokens[node];
                 const bytes = self.file.tree.tokenSlice(token);
                 const Ident = enum { nan, inf };
-                const values = std.ComptimeStringMap(Ident, .{
+                const values = std.StaticStringMap(Ident).initComptime(.{
                     .{ "nan", .nan },
                     .{ "inf", .inf },
                 });
