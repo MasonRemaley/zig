@@ -366,9 +366,27 @@ pub fn Stringifier(comptime Writer: type) type {
                     try container.finish();
                 },
                 .Struct => |StructInfo| if (StructInfo.is_tuple) {
-                    var container = try self.startTuple(.{ .whitespace_style = .{ .fields = StructInfo.fields.len } });
-                    inline for (val) |field_value| {
-                        try container.fieldArbitraryDepth(field_value, options);
+                    // Decide which fields to emit
+                    const fields = if (options.emit_default_optional_fields) b: {
+                        break :b StructInfo.fields.len;
+                    } else inline for (0..StructInfo.fields.len) |i| {
+                        const count = StructInfo.fields.len - i;
+                        const field_index = count - 1;
+                        if (StructInfo.fields[field_index].default_value) |default_field_value_opaque| {
+                            const field_value = val[field_index];
+                            const default_field_value: *const @TypeOf(field_value) = @ptrCast(@alignCast(default_field_value_opaque));
+                            if (!std.meta.eql(field_value, default_field_value.*)) {
+                                break count;
+                            }
+                        } else break count;
+                    } else 0;
+
+                    // Emit those fields
+                    var container = try self.startTuple(.{ .whitespace_style = .{ .fields = fields } });
+                    inline for (0..StructInfo.fields.len) |i| {
+                        if (i < fields) {
+                            try container.fieldArbitraryDepth(val[i], options);
+                        }
                     }
                     try container.finish();
                 } else {
@@ -1622,6 +1640,151 @@ test "stringify skip default fields" {
         , DefaultStrings { .foo = "abcd" },
         .{.emit_default_optional_fields = false},
     );
+}
+
+test "stringify skip default tuple fields" {
+    const Tuple = struct {
+        u8 = 'a',
+        u8 = 'b',
+        u8 = 'c',
+        u8 = 'd',
+    };
+
+    // Not skipping if not set
+    try expectStringifyEqual(
+        \\.{
+        \\    'a',
+        \\    'b',
+        \\    'c',
+        \\    'd',
+        \\}
+        , Tuple{
+            'a',
+            'b',
+            'c',
+            'd',
+        },
+        .{
+            .emit_utf8_codepoints = true,
+            .emit_default_optional_fields = true,
+        },
+    );
+
+    // Skipping if not set
+    try expectStringifyEqual(
+        \\.{}
+        , Tuple{},
+        .{
+            .emit_utf8_codepoints = true,
+            .emit_default_optional_fields = false,
+        },
+    );
+
+    try expectStringifyEqual(
+        \\.{
+        \\    'a',
+        \\    'b',
+        \\    'c',
+        \\    'e',
+        \\}
+        , Tuple{
+            'a',
+            'b',
+            'c',
+            'e',
+        },
+        .{
+            .emit_utf8_codepoints = true,
+            .emit_default_optional_fields = false,
+        },
+    );
+
+    try expectStringifyEqual(
+        \\.{
+        \\    'q',
+        \\    'w',
+        \\    'e',
+        \\    'r',
+        \\}
+        , Tuple{
+            'q',
+            'w',
+            'e',
+            'r',
+        },
+        .{
+            .emit_utf8_codepoints = true,
+            .emit_default_optional_fields = false,
+        },
+    );
+
+    try expectStringifyEqual(
+        \\.{
+        \\    'a',
+        \\    'b',
+        \\    'e',
+        \\}
+        , Tuple{
+            'a',
+            'b',
+            'e',
+        },
+        .{
+            .emit_utf8_codepoints = true,
+            .emit_default_optional_fields = false,
+        },
+    );
+
+    try expectStringifyEqual(
+        \\.{ 'a', 'e' }
+        , Tuple{
+            'a',
+            'e',
+        },
+        .{
+            .emit_utf8_codepoints = true,
+            .emit_default_optional_fields = false,
+        },
+    );
+
+    try expectStringifyEqual(
+        \\.{'e'}
+        , Tuple{
+            'e',
+            },
+        .{
+            .emit_utf8_codepoints = true,
+            .emit_default_optional_fields = false,
+        },
+    );
+
+    {
+        const TupleMissingDefault = struct {
+            u8 = 'a',
+            u8 = 'b',
+            u8 = 'c',
+            u8,
+        };
+
+        try expectStringifyEqual(
+            \\.{
+            \\    'a',
+            \\    'b',
+            \\    'c',
+            \\    'd',
+            \\}
+            , TupleMissingDefault{
+                'a',
+                'b',
+                'c',
+                'd',
+            },
+            .{
+                .emit_utf8_codepoints = true,
+                .emit_default_optional_fields = false,
+            },
+        );
+    }
 }
 
 test "depth limits" {
