@@ -420,6 +420,7 @@ const Writer = struct {
             .elem_val,
             .array_type,
             .coerce_ptr_elem_ty,
+            .import,
             => try self.writePlNodeBin(stream, inst),
 
             .for_len => try self.writePlNodeMultiOp(stream, inst),
@@ -484,7 +485,6 @@ const Writer = struct {
             .enum_literal,
             .decl_ref,
             .decl_val,
-            .import,
             .ret_err_value,
             .ret_err_value_code,
             .param_anytype,
