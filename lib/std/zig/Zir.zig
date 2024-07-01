@@ -1645,7 +1645,7 @@ pub const Inst = struct {
                 .func = .pl_node,
                 .func_inferred = .pl_node,
                 .func_fancy = .pl_node,
-                .import = .pl_node,
+                .import = .pl_tok,
                 .int = .int,
                 .int_big = .str,
                 .float = .float,
@@ -3480,8 +3480,10 @@ pub const Inst = struct {
     };
 
     pub const Import = struct {
-        result_ty: Ref,
-        name: NullTerminatedString,
+        /// The result type of the import, or `.none` if none was available.
+        res_ty: Ref,
+        /// The import path.
+        path: NullTerminatedString,
     };
 };
 
