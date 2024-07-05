@@ -13968,6 +13968,8 @@ fn zirImport(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.
     const operand_src = block.tokenOffset(inst_data.src_tok);
     const operand = sema.code.nullTerminatedString(extra.path);
 
+    _ = extra.res_ty;
+
     const result = pt.importFile(block.getFileScope(zcu), operand) catch |err| switch (err) {
         error.ImportOutsideModulePath => {
             return sema.fail(block, operand_src, "import of file outside module path: '{s}'", .{operand});
@@ -13995,7 +13997,12 @@ fn zirImport(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.
                 // retry this and not cache the file system error, which may be transient.
                 return sema.fail(block, operand_src, "unable to open '{s}': {s}", .{ result.file.sub_file_path, @errorName(err) });
             };
-            const interned = try zon.lower(mod, result.file);
+            // XXX: none vs poison or something? idk.
+            // XXX: it's possible we'll end up wanting to resolve this inside if we have to for all sub pieces anyway, unsure
+            // yet, just getting the gist of it
+            const res_ty_inst = try sema.resolveInstAllowNone(extra.res_ty);
+            const res_ty = res_ty_inst.toTypeAllowNone();
+            const interned = try zon.lower(sema, result.file, res_ty);
             return Air.internedToRef(interned);
         },
     }

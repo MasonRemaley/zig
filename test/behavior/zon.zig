@@ -84,14 +84,49 @@ test "arrays" {
     try expectEqual([4:2]u8{ 'a', 'b', 'c', 'd' }, @import("zon/array.zon"));
 }
 
-test "slices" {
-    try expectEqualSlices(u8, &.{}, @import("zon/slice-empty.zon"));
-    try expectEqualSlices(u8, &.{ 'a', 'b', 'c' }, @import("zon/slice-abc.zon"));
+// XXX: use slice-1
+// XXX: test adding pointers--including nested pointers--to arbitrary types
+// XXX: the errors we get for tuples of the wrong size (bigger or smaller) are different than if the value
+// was inline for some reason
+// XXX: if the types differ, all of zon gets underlined saying that the type is wrong, but it refers to a specific subtype
+// XXX: ideally the error should be equivlane to if we assigned a constant instead of a literal--oh huh, that's sorta wrong too, so not on us?
+test "slices, arrays, tuples" {
+    {
+        const expected_slice: []const u8 = &.{};
+        const found_slice: []const u8 = @import("zon/slice-empty.zon");
+        try expectEqualSlices(u8, expected_slice, found_slice);
+
+        const expected_array: [0]u8 = .{};
+        const found_array: [0]u8 = @import("zon/slice-empty.zon");
+        try expectEqual(expected_array, found_array);
+
+        const T = struct {};
+        const expected_tuple: T = .{};
+        const found_tuple: T = @import("zon/slice-empty.zon");
+        try expectEqual(expected_tuple, found_tuple);
+    }
+
+    {
+        const expected_slice: []const u8 = &.{ 'a', 'b', 'c' };
+        const found_slice: []const u8 = @import("zon/slice-abc.zon");
+        try expectEqualSlices(u8, expected_slice, found_slice);
+
+        const expected_array: [3]u8 = .{ 'a', 'b', 'c' };
+        const found_array: [3]u8 = @import("zon/slice-abc.zon");
+        try expectEqual(expected_array, found_array);
+
+        const T = struct { u8, u8, u8 };
+        const expected_tuple: T = .{ 'a', 'b', 'c' };
+        const found_tuple: T = @import("zon/slice-abc.zon");
+        try expectEqual(expected_tuple, found_tuple);
+    }
 }
 
 test "string literals" {
-    try expectEqualDeep("abc", @import("zon/abc.zon"));
-    try expectEqualDeep("ab\\c", @import("zon/abc-escaped.zon"));
+    // const foo: [3]u8 = "foo".*;
+    // const bar: []const u8 = &foo;
+    try expectEqualSlices(u8, "abc", @import("zon/abc.zon"));
+    try expectEqualSlices(u8, "ab\\c", @import("zon/abc-escaped.zon"));
     const zero_terminated: [:0]const u8 = @import("zon/abc.zon");
     try expectEqualDeep(zero_terminated, "abc");
     try expectEqualStrings(
