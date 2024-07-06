@@ -217,21 +217,22 @@ const FieldTypes = union(enum) {
     },
     none,
 
-    fn init(ty: ?Type, zcu: *Zcu) @This() {
+    fn init(ty: ?Type, sema: *Sema) !@This() {
         const t = ty orelse return .none;
-        const ip = &zcu.intern_pool;
-        switch (t.zigTypeTagOrPoison(zcu) catch return .none) {
+        const ip = &sema.mod.intern_pool;
+        try sema.resolveTypeFields(t);
+        switch (t.zigTypeTagOrPoison(sema.mod) catch return .none) {
             .Struct => return .{ .st = .{
                 .ty = t,
                 .loaded = ip.loadStructType(t.toIntern()),
-            }},
+            } },
             .Union => {
                 const loaded_union_type = ip.loadUnionType(t.toIntern());
                 const loaded_tag_type = loaded_union_type.loadTagType(ip);
-                return .{.un = .{
+                return .{ .un = .{
                     .ty = t,
                     .loaded = loaded_tag_type,
-                }};
+                } };
             },
             else => return .none,
         }
@@ -255,8 +256,8 @@ fn expr(self: LowerZon, node: Ast.Node.Index, res_ty: ?Type) !InternPool.Index {
     const tags = self.file.tree.nodes.items(.tag);
     const main_tokens = self.file.tree.nodes.items(.main_token);
 
-    // If the result type is a pointer, and our AST Node is not the requested pointer, recurse to
-    // the inner type and return a reference to the result.
+    // If the result type is a pointer, and our AST Node is not the requested pointer, recurse into
+    // the type and then store a reference to the result.
     if (res_ty) |rt| b: {
         const type_tag = rt.zigTypeTagOrPoison(self.sema.mod) catch break :b;
         const needs_reference = type_tag == .Pointer and switch (tags[node]) {
@@ -412,7 +413,8 @@ fn expr(self: LowerZon, node: Ast.Node.Index, res_ty: ?Type) !InternPool.Index {
         .struct_init_dot,
         .struct_init_dot_comma,
         .struct_init,
-        .struct_init_comma, => {
+        .struct_init_comma,
+        => {
             var buf: [2]Ast.Node.Index = undefined;
             const struct_init = self.file.tree.fullStructInit(&buf, node).?;
             if (struct_init.ast.type_expr != 0) {
@@ -428,9 +430,7 @@ fn expr(self: LowerZon, node: Ast.Node.Index, res_ty: ?Type) !InternPool.Index {
             defer names.deinit(gpa);
             try names.ensureTotalCapacity(gpa, struct_init.ast.fields.len);
 
-            // XXX: I think I can skip this resolve, if not do it in fieldtypes
-            if (res_ty) |rt| try self.sema.resolveTypeFields(rt);
-            const rt_field_types = FieldTypes.init(res_ty, self.sema.mod);
+            const rt_field_types = try FieldTypes.init(res_ty, self.sema);
             for (struct_init.ast.fields, 0..) |field, i| {
                 const name_token = self.file.tree.firstToken(field) - 2;
                 const name = try self.identAsNullTerminatedString(name_token);
@@ -504,47 +504,6 @@ fn expr(self: LowerZon, node: Ast.Node.Index, res_ty: ?Type) !InternPool.Index {
             return .void_value;
         } else {
             return self.fail(.{ .node_abs = node }, "invalid ZON value", .{});
-        },
-        // XXX: remove this! but not before seeing if we need the logic here for empty slices
-        .address_of => {
-            const child_node = data[node].lhs;
-            switch (tags[child_node]) {
-                .array_init_one, .array_init_one_comma, .array_init_dot_two, .array_init_dot_two_comma, .array_init_dot, .array_init_dot_comma, .array_init, .array_init_comma => {
-                    const value = try self.expr(child_node, null);
-                    const ty = try ip.get(gpa, .{ .ptr_type = .{
-                        .child = ip.typeOf(value),
-                    } });
-                    return ip.get(gpa, .{ .ptr = .{
-                        .ty = ty,
-                        .base_addr = .{ .anon_decl = .{ .orig_ty = ty, .val = value } },
-                        .byte_offset = 0,
-                    } });
-                },
-                .struct_init_one,
-                .struct_init_one_comma,
-                .struct_init_dot_two,
-                .struct_init_dot_two_comma,
-                .struct_init_dot,
-                .struct_init_dot_comma,
-                .struct_init,
-                .struct_init_comma,
-                => {
-                    var buf: [2]Ast.Node.Index = undefined;
-                    const full = self.file.tree.fullStructInit(&buf, child_node).?.ast.fields;
-                    if (full.len == 0) {
-                        const value = .empty_struct;
-                        const ty = try ip.get(gpa, .{ .ptr_type = .{
-                            .child = ip.typeOf(value),
-                        } });
-                        return ip.get(gpa, .{ .ptr = .{
-                            .ty = ty,
-                            .base_addr = .{ .anon_decl = .{ .orig_ty = ty, .val = value } },
-                            .byte_offset = 0,
-                        } });
-                    }
-                },
-                else => {},
-            }
         },
         else => {},
     }

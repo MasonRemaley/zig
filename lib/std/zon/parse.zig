@@ -342,8 +342,6 @@ pub fn parseFree(gpa: Allocator, value: anytype) void {
         .Bool, .Int, .Float, .Enum => {},
         .Pointer => |Pointer| {
             switch (Pointer.size) {
-                // XXX: revisit .One, why is this here? alternatively we could be willing ot heap alloc stuff if the dest does but idk.
-                // XXX: in general don't forget to update the runtime parser with the new syntax!
                 .One, .Many, .C => if (comptime requiresAllocator(Value)) {
                     @compileError(@typeName(Value) ++ ": parseFree cannot free non slice pointers");
                 },

@@ -3169,7 +3169,7 @@ pub const Type = struct {
         const ip = &mod.intern_pool;
         return switch (ip.indexToKey(ty.toIntern())) {
             .struct_type => {
-                const interned = ty.toIntern(); // XXX: CURRENT: somewhere in this block it's getting .none where I wouldn't expect
+                const interned = ty.toIntern();
                 const loaded = ip.loadStructType(interned);
                 const field_types = loaded.field_types.get(ip);
                 const field_type = field_types[index]; // This ends up with none. my guess is that i need to do some step to resolve the inner parts of the type.

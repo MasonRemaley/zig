@@ -84,12 +84,6 @@ test "arrays" {
     try expectEqual([4:2]u8{ 'a', 'b', 'c', 'd' }, @import("zon/array.zon"));
 }
 
-// XXX: use slice-1
-// XXX: test adding pointers--including nested pointers--to arbitrary types
-// XXX: the errors we get for tuples of the wrong size (bigger or smaller) are different than if the value
-// was inline for some reason
-// XXX: if the types differ, all of zon gets underlined saying that the type is wrong, but it refers to a specific subtype
-// XXX: ideally the error should be equivlane to if we assigned a constant instead of a literal--oh huh, that's sorta wrong too, so not on us?
 test "slices, arrays, tuples" {
     {
         const expected_slice: []const u8 = &.{};
