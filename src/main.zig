@@ -6492,7 +6492,7 @@ fn cmdChangelist(
         .tree = undefined,
         .zir = undefined,
         .mod = undefined,
-        .mode = Module.File.modeFromPath(old_source_file),
+        .mode = Zcu.File.modeFromPath(old_source_file),
     };
 
     file.mod = try Package.Module.createLimited(arena, .{

@@ -631,6 +631,7 @@ pub fn lowerToBuildSteps(
 ) void {
     const host = std.zig.system.resolveTargetQuery(.{}) catch |err|
         std.debug.panic("unable to detect native host: {s}\n", .{@errorName(err)});
+    const cases_dir_path = b.build_root.join(b.allocator, &.{ "test", "cases" }) catch @panic("OOM");
 
     for (self.incremental_cases.items) |incr_case| {
         if (true) {
@@ -675,7 +676,6 @@ pub fn lowerToBuildSteps(
             _ = writefiles.addCopyFile(.{ .cwd_relative = import_abs }, import_rel);
         }
 
-        const root_source_file = writefiles.files.items[0].getPath();
         const artifact = if (case.is_test) b.addTest(.{
             .root_source_file = root_source_file,
             .name = case.name,

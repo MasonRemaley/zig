@@ -8648,7 +8648,7 @@ pub fn failWithNumberError(
             assert(bytes.len >= 2 and bytes[0] == '0' and bytes[1] == 'x'); // Validated by tokenizer
             try fail(self, token, @intCast(i), "sign '{c}' cannot follow digit '{c}' in hex base", .{ bytes[i], bytes[i - 1] }, &.{});
         },
-        .period_after_exponent => |i| return astgen.failOff(token, @intCast(i), "unexpected period after exponent", .{}),
+        .period_after_exponent => |i| try fail(self, token, @intCast(i), "unexpected period after exponent", .{}, &.{}),
     }
     return error.AnalysisFail;
 }
