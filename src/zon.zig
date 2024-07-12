@@ -54,8 +54,8 @@ fn fail(
     const src_loc = .{
         .base_node_inst = try self.sema.pt.zcu.intern_pool.trackZir(
             self.sema.pt.zcu.gpa,
-            self.file_index,
-            .main_struct_inst,
+            .main,
+            .{ .file = self.file_index, .inst = .main_struct_inst },
         ),
         .offset = loc,
     };
@@ -114,7 +114,10 @@ fn lowerAstErrors(self: LowerZon) CompileError {
     const err_msg = try Zcu.ErrorMsg.create(
         gpa,
         .{
-            .base_node_inst = try ip.trackZir(gpa, self.file_index, .main_struct_inst),
+            .base_node_inst = try ip.trackZir(gpa, .main, .{
+                .file = self.file_index,
+                .inst = .main_struct_inst,
+            }),
             .offset = .{ .token_abs = parse_err.token + @intFromBool(parse_err.token_is_prev) },
         },
         "{s}",
@@ -129,7 +132,10 @@ fn lowerAstErrors(self: LowerZon) CompileError {
         const byte_abs = token_starts[parse_err.token + @intFromBool(parse_err.token_is_prev)] + bad_off;
         try self.sema.pt.zcu.errNote(
             .{
-                .base_node_inst = try ip.trackZir(gpa, self.file_index, .main_struct_inst),
+                .base_node_inst = try ip.trackZir(gpa, .main, .{
+                    .file = self.file_index,
+                    .inst = .main_struct_inst,
+                }),
                 .offset = .{ .byte_abs = byte_abs },
             },
             err_msg,
@@ -146,7 +152,10 @@ fn lowerAstErrors(self: LowerZon) CompileError {
         try tree.renderError(note, buf.writer(gpa));
         try self.sema.pt.zcu.errNote(
             .{
-                .base_node_inst = try ip.trackZir(gpa, self.file_index, .main_struct_inst),
+                .base_node_inst = try ip.trackZir(gpa, .main, .{
+                    .file = self.file_index,
+                    .inst = .main_struct_inst,
+                }),
                 .offset = .{ .token_abs = note.token + @intFromBool(note.token_is_prev) },
             },
             err_msg,

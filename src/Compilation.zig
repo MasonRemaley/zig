@@ -2250,6 +2250,7 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) !void {
         try comp.astgen_work_queue.ensureUnusedCapacity(zcu.import_table.count());
         for (zcu.import_table.values()) |file_index| {
             if (zcu.fileByIndex(file_index).mod.isBuiltin()) continue;
+            const file = zcu.fileByIndex(file_index);
             if (file.mode == .zig) {
                 comp.astgen_work_queue.writeItemAssumeCapacity(file_index);
             }

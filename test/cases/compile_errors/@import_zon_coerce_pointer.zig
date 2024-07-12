@@ -8,4 +8,4 @@ pub fn main() void {
 // output_mode=Exe
 // imports=zon/array.zon
 //
-// 2:39: error: expected type '*tmp.main__struct_3342', found 'struct{comptime comptime_int = 97, comptime comptime_int = 98, comptime comptime_int = 99}'
+// found 'struct{comptime comptime_int = 97, comptime comptime_int = 98, comptime comptime_int = 99}'

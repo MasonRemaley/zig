@@ -76,6 +76,9 @@ pub const ParseStatus = union(enum) {
     ident_embedded_null: struct {
         token: TokenIndex,
     },
+    address_of: struct {
+        node: NodeIndex,
+    },
 };
 
 /// Parses the given ZON source.
@@ -375,7 +378,19 @@ pub fn parseFree(gpa: Allocator, value: anytype) void {
     }
 }
 
-fn parseExpr(self: *@This(), comptime T: type, comptime options: ParseOptions, node: NodeIndex) error{ OutOfMemory, Type }!T {
+fn parseExpr(
+    self: *@This(),
+    comptime T: type,
+    comptime options: ParseOptions,
+    node: NodeIndex,
+) error{ OutOfMemory, Type }!T {
+    // Check for address of up front so we can emit a friendlier error (otherwise it will just say
+    // that the type is wrong, which may be confusing.)
+    const tags = self.ast.nodes.items(.tag);
+    if (tags[node] == .address_of) {
+        return self.fail(.{ .address_of = .{ .node = node } });
+    }
+
     // Keep in sync with parseFree, stringify, and requiresAllocator.
     switch (@typeInfo(T)) {
         .Bool => return self.parseBool(node),
@@ -891,7 +906,7 @@ test "std.zon structs" {
     {
         const Foo = struct { bar: []const u8, baz: []const []const u8 };
 
-        const parsed = try parseFromSlice(Foo, gpa, ".{.bar = \"qux\", .baz = &.{\"a\", \"b\"}}", .{});
+        const parsed = try parseFromSlice(Foo, gpa, ".{.bar = \"qux\", .baz = .{\"a\", \"b\"}}", .{});
         defer parseFree(gpa, parsed);
         try std.testing.expectEqualDeep(Foo{ .bar = "qux", .baz = &.{ "a", "b" } }, parsed);
     }
@@ -1065,7 +1080,7 @@ test "std.zon structs" {
 
         // Slices
         {
-            var ast = try std.zig.Ast.parse(gpa, "&[3]u8{1, 2, 3}", .zon);
+            var ast = try std.zig.Ast.parse(gpa, "[]u8{1, 2, 3}", .zon);
             defer ast.deinit(gpa);
 
             var status: ParseStatus = .success;
@@ -1076,9 +1091,9 @@ test "std.zon structs" {
             const location = ast.tokenLocation(0, token);
             try std.testing.expectEqual(Ast.Location{
                 .line = 0,
-                .column = 1,
+                .column = 0,
                 .line_start = 0,
-                .line_end = 15,
+                .line_end = 13,
             }, location);
         }
 
@@ -1261,27 +1276,27 @@ test "std.zon arrays and slices" {
 
         // Slice literals
         {
-            const zero = try parseFromSlice([]const u8, gpa, "&.{}", .{});
+            const zero = try parseFromSlice([]const u8, gpa, ".{}", .{});
             defer parseFree(gpa, zero);
             try std.testing.expectEqualSlices(u8, @as([]const u8, &.{}), zero);
 
-            const one = try parseFromSlice([]u8, gpa, "&.{'a'}", .{});
+            const one = try parseFromSlice([]u8, gpa, ".{'a'}", .{});
             defer parseFree(gpa, one);
             try std.testing.expectEqualSlices(u8, &.{'a'}, one);
 
-            const two = try parseFromSlice([]const u8, gpa, "&.{'a', 'b'}", .{});
+            const two = try parseFromSlice([]const u8, gpa, ".{'a', 'b'}", .{});
             defer parseFree(gpa, two);
             try std.testing.expectEqualSlices(u8, &.{ 'a', 'b' }, two);
 
-            const two_comma = try parseFromSlice([]const u8, gpa, "&.{'a', 'b',}", .{});
+            const two_comma = try parseFromSlice([]const u8, gpa, ".{'a', 'b',}", .{});
             defer parseFree(gpa, two_comma);
             try std.testing.expectEqualSlices(u8, &.{ 'a', 'b' }, two_comma);
 
-            const three = try parseFromSlice([]u8, gpa, "&.{'a', 'b', 'c'}", .{});
+            const three = try parseFromSlice([]u8, gpa, ".{'a', 'b', 'c'}", .{});
             defer parseFree(gpa, three);
             try std.testing.expectEqualSlices(u8, &.{ 'a', 'b', 'c' }, three);
 
-            const sentinel = try parseFromSlice([:'z']const u8, gpa, "&.{'a', 'b', 'c'}", .{});
+            const sentinel = try parseFromSlice([:'z']const u8, gpa, ".{'a', 'b', 'c'}", .{});
             defer parseFree(gpa, sentinel);
             const expected_sentinel: [:'z']const u8 = &.{ 'a', 'b', 'c' };
             try std.testing.expectEqualSlices(u8, expected_sentinel, sentinel);
@@ -1300,14 +1315,14 @@ test "std.zon arrays and slices" {
 
         // Slice literals
         {
-            const parsed = try parseFromSlice([]const []const u8, gpa, "&.{\"abc\"}", .{});
+            const parsed = try parseFromSlice([]const []const u8, gpa, ".{\"abc\"}", .{});
             defer parseFree(gpa, parsed);
             const expected: []const []const u8 = &.{"abc"};
             try std.testing.expectEqualDeep(expected, parsed);
         }
     }
 
-    // Senintels and alignment
+    // Sentinels and alignment
     {
         // Arrays
         {
@@ -1319,7 +1334,7 @@ test "std.zon arrays and slices" {
 
         // Slice literals
         {
-            const sentinel = try parseFromSlice([:2]align(4) u8, gpa, "&.{1}", .{});
+            const sentinel = try parseFromSlice([:2]align(4) u8, gpa, ".{1}", .{});
             defer parseFree(gpa, sentinel);
             try std.testing.expectEqual(@as(usize, 1), sentinel.len);
             try std.testing.expectEqual(@as(u8, 1), sentinel[0]);
@@ -1426,7 +1441,7 @@ test "std.zon arrays and slices" {
 
         // Slice
         {
-            var ast = try std.zig.Ast.parse(gpa, "&.{'a', 'b', 'c'}", .zon);
+            var ast = try std.zig.Ast.parse(gpa, ".{'a', 'b', 'c'}", .zon);
             defer ast.deinit(gpa);
             var status: ParseStatus = .success;
             try std.testing.expectError(error.Type, parseFromAst([]bool, gpa, &ast, &status, .{}));
@@ -1437,9 +1452,9 @@ test "std.zon arrays and slices" {
             const location = ast.tokenLocation(0, token);
             try std.testing.expectEqual(Ast.Location{
                 .line = 0,
-                .column = 3,
+                .column = 2,
                 .line_start = 0,
-                .line_end = 17,
+                .line_end = 16,
             }, location);
         }
     }
@@ -1485,60 +1500,35 @@ test "std.zon arrays and slices" {
         }
     }
 
-    // Mixing up arrays and slices
+    // Address of is not allowed (indirection for slices in ZON is implicit)
     {
-        // Array
-        {
-            var ast = try std.zig.Ast.parse(gpa, "&.{'a', 'b', 'c'}", .zon);
-            defer ast.deinit(gpa);
-            var status: ParseStatus = .success;
-            try std.testing.expectError(error.Type, parseFromAst([3]bool, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName([3]bool), status.expected_type.type_name);
-            const node = status.expected_type.node;
-            const main_tokens = ast.nodes.items(.main_token);
-            const token = main_tokens[node];
-            const location = ast.tokenLocation(0, token);
-            try std.testing.expectEqual(Ast.Location{
-                .line = 0,
-                .column = 0,
-                .line_start = 0,
-                .line_end = 17,
-            }, location);
-        }
-
-        // Slice
-        {
-            var ast = try std.zig.Ast.parse(gpa, ".{'a', 'b', 'c'}", .zon);
-            defer ast.deinit(gpa);
-            var status: ParseStatus = .success;
-            try std.testing.expectError(error.Type, parseFromAst([]bool, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName([]bool), status.expected_type.type_name);
-            const node = status.expected_type.node;
-            const main_tokens = ast.nodes.items(.main_token);
-            const token = main_tokens[node];
-            const location = ast.tokenLocation(0, token);
-            try std.testing.expectEqual(Ast.Location{
-                .line = 0,
-                .column = 1,
-                .line_start = 0,
-                .line_end = 16,
-            }, location);
-        }
+        var ast = try std.zig.Ast.parse(gpa, "&.{'a', 'b', 'c'}", .zon);
+        defer ast.deinit(gpa);
+        var status: ParseStatus = .success;
+        try std.testing.expectError(error.Type, parseFromAst([3]bool, gpa, &ast, &status, .{}));
+        const node = status.address_of.node;
+        const main_tokens = ast.nodes.items(.main_token);
+        const token = main_tokens[node];
+        const location = ast.tokenLocation(0, token);
+        try std.testing.expectEqual(Ast.Location{
+            .line = 0,
+            .column = 0,
+            .line_start = 0,
+            .line_end = 17,
+        }, location);
     }
 }
 
 fn parsePointer(self: *@This(), comptime T: type, comptime options: ParseOptions, node: NodeIndex) error{ OutOfMemory, Type }!T {
     const tags = self.ast.nodes.items(.tag);
-    const data = self.ast.nodes.items(.data);
     return switch (tags[node]) {
         .string_literal => try self.parseStringLiteral(T, node),
         .multiline_string_literal => try self.parseMultilineStringLiteral(T, node),
-        .address_of => try self.parseAddressOf(T, options, data[node].lhs),
-        else => self.failExpectedType(T, node),
+        else => self.parseSlice(T, options, node),
     };
 }
 
-fn parseAddressOf(self: *@This(), comptime T: type, comptime options: ParseOptions, node: NodeIndex) error{ OutOfMemory, Type }!T {
+fn parseSlice(self: *@This(), comptime T: type, comptime options: ParseOptions, node: NodeIndex) error{ OutOfMemory, Type }!T {
     const Ptr = @typeInfo(T).Pointer;
     // Make sure we're working with a slice
     switch (Ptr.size) {
@@ -1559,10 +1549,6 @@ fn parseAddressOf(self: *@This(), comptime T: type, comptime options: ParseOptio
         sentinel,
     );
     errdefer self.gpa.free(slice);
-    // try self.allocations.append(self.gpa, .{
-    //     .buf = std.mem.sliceAsBytes(slice),
-    //     .log2_buf_align = std.math.log2(Ptr.alignment),
-    // });
 
     // Parse the elements and return the slice
     for (slice, element_nodes, 0..) |*element, element_node, initialized| {
@@ -2953,7 +2939,7 @@ test "std.zon free on error" {
     // Test freeing partially allocated slices
     {
         try std.testing.expectError(error.Type, parseFromSlice([][]const u8, std.testing.allocator,
-            \\&.{
+            \\.{
             \\    "hello",
             \\    "world",
             \\    false,
@@ -3021,7 +3007,7 @@ test "std.zon free on error" {
     // Again but for slices.
     {
         const S = []union { x: []const u8 };
-        const result = try parseFromSlice(S, std.testing.allocator, "&.{ .{ .x = \"foo\" }, .{ .x = \"bar\" } }", .{
+        const result = try parseFromSlice(S, std.testing.allocator, ".{ .{ .x = \"foo\" }, .{ .x = \"bar\" } }", .{
             .free_on_error = false,
         });
         defer std.testing.allocator.free(result);

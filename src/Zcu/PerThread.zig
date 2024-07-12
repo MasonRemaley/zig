@@ -1469,6 +1469,7 @@ pub fn importPkg(pt: Zcu.PerThread, mod: *Module) !Zcu.ImportFileResult {
         .zir = undefined,
         .status = .never_loaded,
         .mod = mod,
+        .mode = Zcu.File.modeFromPath(sub_file_path),
     };
 
     try new_file.addReference(zcu, .{ .root = mod });
@@ -1500,7 +1501,7 @@ pub fn importFile(
         return pt.importPkg(pkg);
     }
     if (!std.mem.endsWith(u8, import_string, ".zig") and
-        !std.mem.endsWith(u8, import_string, ".zon")
+        !std.mem.endsWith(u8, import_string, ".zon"))
     {
         return error.ModuleNotFound;
     }
@@ -1581,6 +1582,7 @@ pub fn importFile(
         .zir = undefined,
         .status = .never_loaded,
         .mod = mod,
+        .mode = Zcu.File.modeFromPath(sub_file_path),
     };
 
     return .{
