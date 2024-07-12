@@ -272,15 +272,15 @@ fn expr(self: LowerZon, node: Ast.Node.Index, res_ty: ?Type) !InternPool.Index {
     const tags = self.file.tree.nodes.items(.tag);
     const main_tokens = self.file.tree.nodes.items(.main_token);
 
-    // If the result type is a pointer, and our AST Node is not the requested pointer, recurse into
-    // the type and then store a reference to the result.
-    if (res_ty) |rt| b: {
-        const type_tag = rt.zigTypeTagOrPoison(self.sema.pt.zcu) catch break :b;
-        const needs_reference = type_tag == .Pointer and switch (tags[node]) {
-            .string_literal, .multiline_string_literal => rt.childType(self.sema.pt.zcu).toIntern() != .u8_type,
-            else => true,
+    // If the result type is slice, and our AST Node is not a slice, recurse and then take the
+    // address of the result so attempt to coerce it into a slice.
+    if (res_ty) |rt| {
+        const result_is_slice = rt.isSlice(self.sema.pt.zcu);
+        const ast_is_pointer = switch (tags[node]) {
+            .string_literal, .multiline_string_literal => true,
+            else => false,
         };
-        if (needs_reference) {
+        if (result_is_slice and !ast_is_pointer) {
             const val = try self.expr(node, rt.childType(self.sema.pt.zcu));
             const val_type = ip.typeOf(val);
             const ptr_type = try self.sema.pt.ptrTypeSema(.{
@@ -525,15 +525,6 @@ fn expr(self: LowerZon, node: Ast.Node.Index, res_ty: ?Type) !InternPool.Index {
     }
 
     return self.fail(.{ .node_abs = node }, "invalid ZON value", .{});
-}
-
-fn numberOrNegation(self: LowerZon, node: Ast.Node.Index) !InternPool.Index {
-    const data = self.file.tree.nodes.items(.data);
-    const tags = self.file.tree.nodes.items(.tag);
-    switch (tags[node]) {
-        .negation => self.number(data[node].lhs, true),
-        _ => self.number(node, false),
-    }
 }
 
 fn number(self: LowerZon, node: Ast.Node.Index, is_negative: ?Ast.Node.Index) !InternPool.Index {
