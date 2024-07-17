@@ -64,39 +64,6 @@ fn fail(
     return error.AnalysisFail;
 }
 
-fn failWithStrLitError(
-    self: LowerZon,
-    _: Ast.TokenIndex,
-    byte_abs: u32,
-    comptime format: []const u8,
-    args: anytype,
-) (Allocator.Error || error{AnalysisFail}) {
-    return self.fail(.{ .byte_abs = byte_abs }, format, args);
-}
-
-fn numberError(
-    self: LowerZon,
-    _: Ast.TokenIndex,
-    byte_abs: u32,
-    comptime format: []const u8,
-    args: anytype,
-    notes: []const u32,
-) Allocator.Error!void {
-    _ = notes;
-    switch (self.fail(.{ .byte_abs = byte_abs }, format, args)) {
-        error.AnalysisFail => {},
-        else => |err| return err,
-    }
-}
-
-fn errNote(self: LowerZon, token: Ast.TokenIndex, comptime format: []const u8, args: anytype) Allocator.Error!u32 {
-    _ = self;
-    _ = token;
-    _ = format;
-    _ = args;
-    return 0;
-}
-
 fn lowerAstErrors(self: LowerZon) CompileError {
     const tree = self.file.tree;
     assert(tree.errors.len > 0);
@@ -202,13 +169,10 @@ fn ident(self: LowerZon, token: Ast.TokenIndex) !Ident {
             },
             .failure => |err| {
                 const offset = self.file.tree.tokens.items(.start)[token];
-                return AstGen.failWithStrLitError(
-                    self,
-                    failWithStrLitError,
-                    err,
-                    token,
-                    raw_string,
-                    offset,
+                return self.fail(
+                    .{ .byte_abs = offset + @as(u32, @intCast(err.offset())) },
+                    "{}",
+                    .{err.fmtWithSource(raw_string)},
                 );
             },
         }
@@ -358,13 +322,10 @@ fn expr(self: LowerZon, node: Ast.Node.Index, res_ty: ?Type) !InternPool.Index {
                 .success => {},
                 .failure => |err| {
                     const offset = self.file.tree.tokens.items(.start)[token];
-                    return AstGen.failWithStrLitError(
-                        self,
-                        failWithStrLitError,
-                        err,
-                        token,
-                        raw_string,
-                        offset,
+                    return self.fail(
+                        .{ .byte_abs = offset + @as(u32, @intCast(err.offset())) },
+                        "{}",
+                        .{err.fmtWithSource(raw_string)},
                     );
                 },
             }
@@ -546,14 +507,14 @@ fn number(self: LowerZon, node: Ast.Node.Index, is_negative: ?Ast.Node.Index) !I
             const token_bytes = self.file.tree.tokenSlice(token);
             const char = switch (std.zig.string_literal.parseCharLiteral(token_bytes)) {
                 .success => |char| char,
-                .failure => |err| return AstGen.failWithStrLitError(
-                    self,
-                    failWithStrLitError,
-                    err,
-                    token,
-                    token_bytes,
-                    0,
-                ),
+                .failure => |err| {
+                    const offset = self.file.tree.tokens.items(.start)[token];
+                    return self.fail(
+                        .{ .byte_abs = offset + @as(u32, @intCast(err.offset())) },
+                        "{}",
+                        .{err.fmtWithSource(token_bytes)},
+                    );
+                },
             };
             return self.sema.pt.zcu.intern_pool.get(gpa, self.sema.pt.tid, .{ .int = .{
                 .ty = try self.sema.pt.intern(.{ .simple_type = .comptime_int }),
@@ -618,14 +579,14 @@ fn number(self: LowerZon, node: Ast.Node.Index, is_negative: ?Ast.Node.Index) !I
                         .storage = .{ .f128 = float },
                     } });
                 },
-                .failure => |err| return AstGen.failWithNumberError(
-                    self,
-                    numberError,
-                    errNote,
-                    err,
-                    token,
-                    token_bytes,
-                ),
+                .failure => |err| {
+                    const offset = self.file.tree.tokens.items(.start)[token];
+                    return self.fail(
+                        .{ .byte_abs = offset + @as(u32, @intCast(err.offset())) },
+                        "{}",
+                        .{err.fmtWithSource(token_bytes)},
+                    );
+                },
             }
         },
         .identifier => {

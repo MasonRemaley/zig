@@ -30,19 +30,24 @@ pub const ParseStatus = union {
     failure: ParseFailure,
 };
 
-/// Information about a parse failure. Intended to be displayed to the user via the default
-/// formatter, inner representation may change.
+/// Information about a parse failure for presentation to the user via the format functions.
 pub const ParseFailure = struct {
+    ast: *const Ast,
     token: TokenIndex,
+    reason: Reason,
 
-    reason: union(enum) {
+    const Reason = union(enum) {
         out_of_memory: void,
-        expected_type: struct {
-            type_name: []const u8,
+        expected_union: void,
+        expected_struct: void,
+        expected_primitive: struct { type_name: []const u8 },
+        expected_enum: void,
+        expected_tuple_with_fields: struct {
+            fields: usize,
         },
-        cannot_represent: struct {
-            type_name: []const u8,
-        },
+        expected_tuple: void,
+        expected_string: void,
+        cannot_represent: struct { type_name: []const u8 },
         negative_integer_zero: void,
         invalid_string_literal: struct {
             err: StringLiteralError,
@@ -50,19 +55,131 @@ pub const ParseFailure = struct {
         invalid_number_literal: struct {
             err: NumberLiteralError,
         },
-        unknown_field: struct {
-            type_name: []const u8,
+        unexpected_field: struct {
+            fields: []const []const u8,
         },
         missing_field: struct {
-            type_name: []const u8,
             field_name: []const u8,
         },
         duplicate_field: void,
         type_expr: void,
-        ident_embedded_null: void,
         address_of: void,
-    },
+    };
+
+    pub fn fmtLocation(self: *const @This()) std.fmt.Formatter(formatLocation) {
+        return .{ .data = self };
+    }
+
+    fn formatLocation(
+        self: *const @This(),
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = options;
+        _ = fmt;
+        const l = self.ast.tokenLocation(0, self.token);
+        const offset = switch (self.reason) {
+            .invalid_string_literal => |r| r.err.offset(),
+            .invalid_number_literal => |r| r.err.offset(),
+            else => 0,
+        };
+        try writer.print("{}:{}", .{ l.line + 1, l.column + 1 + offset });
+    }
+
+    pub fn fmtReason(self: *const @This()) std.fmt.Formatter(formatReason) {
+        return .{ .data = self };
+    }
+
+    fn formatReason(
+        self: *const @This(),
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = options;
+        _ = fmt;
+        return switch (self.reason) {
+            .out_of_memory => writer.writeAll("out of memory"),
+            .expected_union => writer.writeAll("expected union"),
+            .expected_struct => writer.writeAll("expected struct"),
+            .expected_primitive => |r| writer.print("expected {s}", .{r.type_name}),
+            .expected_enum => writer.writeAll("expected enum literal"),
+            .expected_tuple_with_fields => |r| {
+                const plural = if (r.fields == 1) "" else "s";
+                try writer.print("expected tuple with {} field{s}", .{ r.fields, plural });
+            },
+            .expected_tuple => writer.writeAll("expected tuple"),
+            .expected_string => writer.writeAll("expected string"),
+            .cannot_represent => |r| writer.print("{s} cannot represent value", .{r.type_name}),
+            .negative_integer_zero => writer.writeAll("integer literal '-0' is ambiguous"),
+            .invalid_string_literal => |r| writer.print("{}", .{r.err.fmtWithSource(self.ast.tokenSlice(self.token))}),
+            .invalid_number_literal => |r| writer.print("{}", .{r.err.fmtWithSource(self.ast.tokenSlice(self.token))}),
+            .unexpected_field => |r| {
+                try writer.writeAll("unexpected field, ");
+                if (r.fields.len == 0) {
+                    try writer.writeAll("no fields expected");
+                } else {
+                    try writer.writeAll("supported fields: ");
+                    for (0..r.fields.len) |i| {
+                        if (i != 0) try writer.writeAll(", ");
+                        try writer.print("{}", .{std.zig.fmtId(r.fields[i])});
+                    }
+                }
+            },
+            .missing_field => |r| writer.print("missing required field {s}", .{r.field_name}),
+            .duplicate_field => writer.writeAll("duplicate field"),
+            .type_expr => writer.writeAll("ZON cannot contain type expressions"),
+            .address_of => writer.writeAll("ZON cannot take the address of a value"),
+        };
+    }
+
+    pub fn format(
+        self: @This(),
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+        try writer.print("{}: {}", .{ self.fmtLocation(), self.fmtReason() });
+    }
 };
+
+test "std.zon failure/oom formatting" {
+    const gpa = std.testing.allocator;
+
+    // Generate a failure
+    var ast = try std.zig.Ast.parse(gpa, "\"foo\"", .zon);
+    defer ast.deinit(gpa);
+    var failing_allocator = std.testing.FailingAllocator.init(gpa, .{
+        .fail_index = 0,
+        .resize_fail_index = 0,
+    });
+    var status: ParseStatus = undefined;
+    try std.testing.expectError(error.OutOfMemory, parseFromAst(
+        []const u8,
+        failing_allocator.allocator(),
+        &ast,
+        &status,
+        .{},
+    ));
+
+    // Verify that we can format the entire failure.
+    const full = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+    defer gpa.free(full);
+    try std.testing.expectEqualStrings("1:1: out of memory", full);
+
+    // Verify that we can format the location by itself
+    const location = try std.fmt.allocPrint(gpa, "{}", .{status.failure.fmtLocation()});
+    defer gpa.free(location);
+    try std.testing.expectEqualStrings("1:1", location);
+
+    // Verify that we can format the reason by itself
+    const reason = try std.fmt.allocPrint(gpa, "{}", .{status.failure.fmtReason()});
+    defer std.testing.allocator.free(reason);
+    try std.testing.expectEqualStrings("out of memory", reason);
+}
 
 /// Parses the given ZON source.
 ///
@@ -105,13 +222,15 @@ test "std.zon parseFromSlice syntax error" {
     try std.testing.expectError(error.Syntax, parseFromSlice(u8, std.testing.allocator, ".{", .{}));
 }
 
-/// Like `parseFromSlice`, but operates on an AST instead of on ZON source.
+/// Like `parseFromSlice`, but operates on an AST instead of on ZON source. Asserts that the AST's
+/// `errors` field is empty.
 ///
 /// Returns `error.OutOfMemory` if allocation fails, or `error.Type` if the ZON could not be
 /// deserialized into `T`.
 ///
 /// If `status` is not null, its success field will be set on success, and its failure field will be
-/// set on failure.
+/// set on failure. See `ParseFailure` for formatting ZON parse failures in a  human readable
+/// manner. For formatting AST errors, see `std.zig.Ast.renderError`.
 pub fn parseFromAst(comptime T: type, gpa: Allocator, ast: *const Ast, status: ?*ParseStatus, comptime options: ParseOptions) error{ OutOfMemory, Type }!T {
     assert(ast.errors.len == 0);
     const data = ast.nodes.items(.data);
@@ -152,20 +271,8 @@ pub fn parseFromAstNode(comptime T: type, gpa: Allocator, ast: *const Ast, node:
 
     // Attempt the parse, setting status and returning early if it fails
     const result = parser.parseExpr(T, options, node) catch |err| switch (err) {
-        error.OutOfMemory => {
-            // Set status to out of memory
-            if (status) |s| s.* = .{
-                .failure = .{
-                    .token = 0,
-                    .reason = .out_of_memory,
-                },
-            };
-            return err;
-        },
-        error.Type => {
-            // Status was already set when returning this error
-            return err;
-        },
+        error.ParserOutOfMemory => return error.OutOfMemory,
+        error.Type => return error.Type,
     };
 
     // Set status to success and return the result
@@ -386,17 +493,14 @@ fn parseExpr(
     comptime T: type,
     comptime options: ParseOptions,
     node: NodeIndex,
-) error{ OutOfMemory, Type }!T {
+) error{ ParserOutOfMemory, Type }!T {
     // Check for address of up front so we can emit a friendlier error (otherwise it will just say
     // that the type is wrong, which may be confusing.)
     const tags = self.ast.nodes.items(.tag);
     if (tags[node] == .address_of) {
         const main_tokens = self.ast.nodes.items(.main_token);
         const token = main_tokens[node];
-        return self.fail(.{
-            .token = token,
-            .reason = .address_of,
-        });
+        return self.fail(token, .address_of);
     }
 
     // Keep in sync with parseFree, stringify, and requiresAllocator.
@@ -418,19 +522,19 @@ fn parseExpr(
     }
 }
 
-fn parseVoid(self: @This(), node: NodeIndex) error{ OutOfMemory, Type }!void {
+fn parseVoid(self: @This(), node: NodeIndex) error{ ParserOutOfMemory, Type }!void {
     const main_tokens = self.ast.nodes.items(.main_token);
     const token = main_tokens[node];
     const tags = self.ast.nodes.items(.tag);
     const data = self.ast.nodes.items(.data);
     switch (tags[node]) {
         .block_two => if (data[node].lhs != 0 or data[node].rhs != 0) {
-            return self.failExpectedType(void, token);
+            return self.fail(token, .{ .expected_primitive = .{ .type_name = "void" } });
         },
         .block => if (data[node].lhs != data[node].rhs) {
-            return self.failExpectedType(void, token);
+            return self.fail(token, .{ .expected_primitive = .{ .type_name = "void" } });
         },
-        else => return self.failExpectedType(void, token),
+        else => return self.fail(token, .{ .expected_primitive = .{ .type_name = "void" } }),
     }
 }
 
@@ -450,19 +554,13 @@ test "std.zon void" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(void, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(void), status.failure.reason.expected_type.type_name);
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 0,
-            .line_start = 0,
-            .line_end = 3,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:1: expected void", formatted);
     }
 }
 
-fn parseOptional(self: *@This(), comptime T: type, comptime options: ParseOptions, node: NodeIndex) error{ OutOfMemory, Type }!T {
+fn parseOptional(self: *@This(), comptime T: type, comptime options: ParseOptions, node: NodeIndex) error{ ParserOutOfMemory, Type }!T {
     const Optional = @typeInfo(T).Optional;
 
     const tags = self.ast.nodes.items(.tag);
@@ -499,7 +597,7 @@ test "std.zon optional" {
     }
 }
 
-fn parseUnion(self: *@This(), comptime T: type, comptime options: ParseOptions, node: NodeIndex) error{ OutOfMemory, Type }!T {
+fn parseUnion(self: *@This(), comptime T: type, comptime options: ParseOptions, node: NodeIndex) error{ ParserOutOfMemory, Type }!T {
     const Union = @typeInfo(T).Union;
     const field_infos = Union.fields;
 
@@ -518,23 +616,20 @@ fn parseUnion(self: *@This(), comptime T: type, comptime options: ParseOptions, 
 
     // Parse the union
     const main_tokens = self.ast.nodes.items(.main_token);
+    const token = main_tokens[node];
     const tags = self.ast.nodes.items(.tag);
     if (tags[node] == .enum_literal) {
         // The union must be tagged for an enum literal to coerce to it
         if (Union.tag_type == null) {
-            return self.failExpectedType(T, main_tokens[node]);
+            return self.fail(main_tokens[node], .expected_union);
         }
 
         // Get the index of the named field. We don't use `parseEnum` here as
         // the order of the enum and the order of the union might not match!
         const field_index = b: {
-            const token = main_tokens[node];
-            const bytes = self.parseIdent(token) catch |err| switch (err) {
-                error.IdentTooLong => return self.failUnknownField(T, token),
-                else => |e| return e,
-            };
+            const bytes = try self.parseIdent(T, token);
             break :b field_indices.get(bytes) orelse
-                return self.failUnknownField(T, token);
+                return self.failUnexpectedField(T, token);
         };
 
         // Initialize the union from the given field.
@@ -542,7 +637,7 @@ fn parseUnion(self: *@This(), comptime T: type, comptime options: ParseOptions, 
             inline 0...field_infos.len - 1 => |i| {
                 // Fail if the field is not void
                 if (field_infos[i].type != void)
-                    return self.failExpectedType(T, main_tokens[node]);
+                    return self.fail(token, .expected_union);
 
                 // Instantiate the union
                 return @unionInit(T, field_infos[i].name, {});
@@ -554,19 +649,16 @@ fn parseUnion(self: *@This(), comptime T: type, comptime options: ParseOptions, 
         const field_nodes = try self.fields(T, &buf, node);
 
         if (field_nodes.len != 1) {
-            return self.failExpectedType(T, main_tokens[node]);
+            return self.fail(token, .expected_union);
         }
 
         // Fill in the field we found
         const field_node = field_nodes[0];
         const field_token = self.ast.firstToken(field_node) - 2;
         const field_index = b: {
-            const name = self.parseIdent(field_token) catch |err| switch (err) {
-                error.IdentTooLong => return self.failUnknownField(T, field_token),
-                else => |e| return e,
-            };
+            const name = try self.parseIdent(T, field_token);
             break :b field_indices.get(name) orelse
-                return self.failUnknownField(T, field_token);
+                return self.failUnexpectedField(T, field_token);
         };
 
         switch (field_index) {
@@ -625,16 +717,9 @@ test "std.zon unions" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Union, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Union), status.failure.reason.unknown_field.type_name);
-        try std.testing.expectEqualStrings("z", ast.tokenSlice(status.failure.token));
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 3,
-            .line_start = 0,
-            .line_end = 9,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:4: unexpected field, supported fields: x, y", formatted);
     }
 
     // Unknown field with name that's too long for parse
@@ -644,16 +729,9 @@ test "std.zon unions" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Union, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Union), status.failure.reason.unknown_field.type_name);
-        try std.testing.expectEqualStrings("@\"abc\"", ast.tokenSlice(status.failure.token));
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 3,
-            .line_start = 0,
-            .line_end = 14,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:4: unexpected field, supported fields: x, y", formatted);
     }
 
     // Extra field
@@ -663,15 +741,9 @@ test "std.zon unions" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Union, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Union), status.failure.reason.expected_type.type_name);
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 1,
-            .line_start = 0,
-            .line_end = 22,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:2: expected union", formatted);
     }
 
     // No fields
@@ -681,15 +753,9 @@ test "std.zon unions" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Union, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Union), status.failure.reason.expected_type.type_name);
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 1,
-            .line_start = 0,
-            .line_end = 3,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:2: expected union", formatted);
     }
 
     // Enum literals cannot coerce into untagged unions
@@ -699,15 +765,9 @@ test "std.zon unions" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Union, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Union), status.failure.reason.expected_type.type_name);
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 1,
-            .line_start = 0,
-            .line_end = 2,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:2: expected union", formatted);
     }
 
     // Unknown field for enum literal coercion
@@ -717,16 +777,9 @@ test "std.zon unions" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Union, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Union), status.failure.reason.unknown_field.type_name);
-        try std.testing.expectEqualStrings("y", ast.tokenSlice(status.failure.token));
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 1,
-            .line_start = 0,
-            .line_end = 2,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:2: unexpected field, supported fields: x", formatted);
     }
 
     // Unknown field for enum literal coercion that's too long for parse
@@ -736,16 +789,9 @@ test "std.zon unions" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Union, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Union), status.failure.reason.unknown_field.type_name);
-        try std.testing.expectEqualStrings("@\"abc\"", ast.tokenSlice(status.failure.token));
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 1,
-            .line_start = 0,
-            .line_end = 7,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:2: unexpected field, supported fields: x", formatted);
     }
 
     // Non void field for enum literal coercion
@@ -755,15 +801,9 @@ test "std.zon unions" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Union, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Union), status.failure.reason.expected_type.type_name);
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 1,
-            .line_start = 0,
-            .line_end = 2,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:2: expected union", formatted);
     }
 
     // Union field with @
@@ -797,14 +837,13 @@ fn elements(
         if (init.ast.type_expr != 0) {
             return self.failTypeExpr(main_tokens[init.ast.type_expr]);
         }
-        if (init.ast.fields.len != 0) {
-            return self.failExpectedType(T, main_tokens[node]);
+        if (init.ast.fields.len == 0) {
+            return init.ast.fields;
         }
-        return init.ast.fields;
     }
 
     // Fail
-    return self.failExpectedType(T, main_tokens[node]);
+    return self.failExpectedContainer(T, main_tokens[node]);
 }
 
 fn fields(
@@ -829,16 +868,16 @@ fn fields(
             return self.failTypeExpr(main_tokens[init.ast.type_expr]);
         }
         if (init.ast.elements.len != 0) {
-            return self.failExpectedType(T, main_tokens[node]);
+            return self.failExpectedContainer(T, main_tokens[node]);
         }
         return init.ast.elements;
     }
 
     // Fail otherwise
-    return self.failExpectedType(T, main_tokens[node]);
+    return self.failExpectedContainer(T, main_tokens[node]);
 }
 
-fn parseStruct(self: *@This(), comptime T: type, comptime options: ParseOptions, node: NodeIndex) error{ OutOfMemory, Type }!T {
+fn parseStruct(self: *@This(), comptime T: type, comptime options: ParseOptions, node: NodeIndex) error{ ParserOutOfMemory, Type }!T {
     const Struct = @typeInfo(T).Struct;
     const field_infos = Struct.fields;
 
@@ -863,7 +902,7 @@ fn parseStruct(self: *@This(), comptime T: type, comptime options: ParseOptions,
         // If we fail to parse this field, free all fields before it
         errdefer if (options.free_on_error and field_infos.len > 0) {
             for (field_nodes[0..initialized]) |initialized_field_node| {
-                const name_runtime = self.parseIdent(self.ast.firstToken(initialized_field_node) - 2) catch unreachable;
+                const name_runtime = self.parseIdent(T, self.ast.firstToken(initialized_field_node) - 2) catch unreachable;
                 switch (field_indices.get(name_runtime) orelse continue) {
                     inline 0...(field_infos.len - 1) => |name_index| {
                         const name = field_infos[name_index].name;
@@ -876,14 +915,11 @@ fn parseStruct(self: *@This(), comptime T: type, comptime options: ParseOptions,
 
         const name_token = self.ast.firstToken(field_node) - 2;
         const i = b: {
-            const name = self.parseIdent(name_token) catch |err| switch (err) {
-                error.IdentTooLong => return self.failUnknownField(T, name_token),
-                else => |e| return e,
-            };
+            const name = try self.parseIdent(T, name_token);
             break :b field_indices.get(name) orelse if (options.ignore_unknown_fields) {
                 continue;
             } else {
-                return self.failUnknownField(T, name_token);
+                return self.failUnexpectedField(T, name_token);
             };
         };
 
@@ -913,7 +949,7 @@ fn parseStruct(self: *@This(), comptime T: type, comptime options: ParseOptions,
                 @field(result, field_info.name) = typed.*;
             } else {
                 const main_tokens = self.ast.nodes.items(.main_token);
-                return self.failMissingField(T, field_infos[i].name, main_tokens[node]);
+                return self.failMissingField(field_infos[i].name, main_tokens[node]);
             }
         }
     }
@@ -960,16 +996,9 @@ test "std.zon structs" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Vec2, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Vec2), status.failure.reason.unknown_field.type_name);
-        try std.testing.expectEqualStrings("z", ast.tokenSlice(status.failure.token));
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 11,
-            .line_start = 0,
-            .line_end = 17,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:12: unexpected field, supported fields: x, y", formatted);
     }
 
     // Unknown field too long for parse
@@ -979,16 +1008,9 @@ test "std.zon structs" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Vec2, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Vec2), status.failure.reason.unknown_field.type_name);
-        try std.testing.expectEqualStrings("@\"abc\"", ast.tokenSlice(status.failure.token));
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 11,
-            .line_start = 0,
-            .line_end = 22,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:12: unexpected field, supported fields: x, y", formatted);
     }
 
     // Duplicate field
@@ -998,21 +1020,17 @@ test "std.zon structs" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Vec2, gpa, &ast, &status, .{}));
-        const token = status.failure.token;
-        try std.testing.expectEqualStrings("x", ast.tokenSlice(token));
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 11,
-            .line_start = 0,
-            .line_end = 17,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:12: duplicate field", formatted);
     }
 
     // Ignore unknown fields
     {
         const Vec2 = struct { x: f32, y: f32 = 2.0 };
-        const parsed = try parseFromSlice(Vec2, gpa, ".{ .x = 1.0, .z = 3.0 }", .{ .ignore_unknown_fields = true });
+        const parsed = try parseFromSlice(Vec2, gpa, ".{ .x = 1.0, .z = 3.0 }", .{
+            .ignore_unknown_fields = true,
+        });
         try std.testing.expectEqual(Vec2{ .x = 1.0, .y = 2.0 }, parsed);
     }
 
@@ -1023,16 +1041,9 @@ test "std.zon structs" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Vec2, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Vec2), status.failure.reason.unknown_field.type_name);
-        try std.testing.expectEqualStrings("x", ast.tokenSlice(status.failure.token));
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 3,
-            .line_start = 0,
-            .line_end = 17,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:4: unexpected field, no fields expected", formatted);
     }
 
     // Missing field
@@ -1042,16 +1053,9 @@ test "std.zon structs" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Vec2, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Vec2), status.failure.reason.missing_field.type_name);
-        try std.testing.expectEqualStrings("y", status.failure.reason.missing_field.field_name);
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 1,
-            .line_start = 0,
-            .line_end = 9,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:2: missing required field y", formatted);
     }
 
     // Default field
@@ -1087,14 +1091,9 @@ test "std.zon structs" {
 
             var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst(Empty, gpa, &ast, &status, .{}));
-            const token = status.failure.token;
-            const location = ast.tokenLocation(0, token);
-            try std.testing.expectEqual(Ast.Location{
-                .line = 0,
-                .column = 0,
-                .line_start = 0,
-                .line_end = 7,
-            }, location);
+            const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+            defer gpa.free(formatted);
+            try std.testing.expectEqualStrings("1:1: ZON cannot contain type expressions", formatted);
         }
 
         // Arrays
@@ -1104,14 +1103,9 @@ test "std.zon structs" {
 
             var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([3]u8, gpa, &ast, &status, .{}));
-            const token = status.failure.token;
-            const location = ast.tokenLocation(0, token);
-            try std.testing.expectEqual(Ast.Location{
-                .line = 0,
-                .column = 0,
-                .line_start = 0,
-                .line_end = 14,
-            }, location);
+            const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+            defer gpa.free(formatted);
+            try std.testing.expectEqualStrings("1:1: ZON cannot contain type expressions", formatted);
         }
 
         // Slices
@@ -1121,14 +1115,9 @@ test "std.zon structs" {
 
             var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([]u8, gpa, &ast, &status, .{}));
-            const token = status.failure.token;
-            const location = ast.tokenLocation(0, token);
-            try std.testing.expectEqual(Ast.Location{
-                .line = 0,
-                .column = 0,
-                .line_start = 0,
-                .line_end = 13,
-            }, location);
+            const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+            defer gpa.free(formatted);
+            try std.testing.expectEqualStrings("1:1: ZON cannot contain type expressions", formatted);
         }
 
         // Tuples
@@ -1139,19 +1128,14 @@ test "std.zon structs" {
 
             var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst(Tuple, gpa, &ast, &status, .{}));
-            const token = status.failure.token;
-            const location = ast.tokenLocation(0, token);
-            try std.testing.expectEqual(Ast.Location{
-                .line = 0,
-                .column = 0,
-                .line_start = 0,
-                .line_end = 14,
-            }, location);
+            const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+            defer gpa.free(formatted);
+            try std.testing.expectEqualStrings("1:1: ZON cannot contain type expressions", formatted);
         }
     }
 }
 
-fn parseTuple(self: *@This(), comptime T: type, comptime options: ParseOptions, node: NodeIndex) error{ OutOfMemory, Type }!T {
+fn parseTuple(self: *@This(), comptime T: type, comptime options: ParseOptions, node: NodeIndex) error{ ParserOutOfMemory, Type }!T {
     const Struct = @typeInfo(T).Struct;
     const field_infos = Struct.fields;
 
@@ -1163,7 +1147,7 @@ fn parseTuple(self: *@This(), comptime T: type, comptime options: ParseOptions, 
 
     if (field_nodes.len != field_infos.len) {
         const main_tokens = self.ast.nodes.items(.main_token);
-        return self.failExpectedType(T, main_tokens[node]);
+        return self.failExpectedContainer(T, main_tokens[node]);
     }
 
     inline for (field_infos, field_nodes, 0..) |field_info, field_node, initialized| {
@@ -1219,15 +1203,9 @@ test "std.zon tuples" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Tuple, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Tuple), status.failure.reason.expected_type.type_name);
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 1,
-            .line_start = 0,
-            .line_end = 17,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:2: expected tuple with 2 fields", formatted);
     }
 
     // Extra field
@@ -1237,15 +1215,9 @@ test "std.zon tuples" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Tuple, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Tuple), status.failure.reason.expected_type.type_name);
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 1,
-            .line_start = 0,
-            .line_end = 6,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:2: expected tuple with 2 fields", formatted);
     }
 
     // Tuple with unexpected field names
@@ -1255,15 +1227,9 @@ test "std.zon tuples" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Tuple, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Tuple), status.failure.reason.expected_type.type_name);
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 1,
-            .line_start = 0,
-            .line_end = 14,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:2: expected tuple with 1 field", formatted);
     }
 
     // Struct with missing field names
@@ -1273,19 +1239,13 @@ test "std.zon tuples" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Struct, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Struct), status.failure.reason.expected_type.type_name);
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 1,
-            .line_start = 0,
-            .line_end = 7,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:2: expected struct", formatted);
     }
 }
 
-fn parseArray(self: *@This(), comptime T: type, comptime options: ParseOptions, node: NodeIndex) error{ OutOfMemory, Type }!T {
+fn parseArray(self: *@This(), comptime T: type, comptime options: ParseOptions, node: NodeIndex) error{ ParserOutOfMemory, Type }!T {
     const Array = @typeInfo(T).Array;
     // Parse the array
     var array: T = undefined;
@@ -1295,7 +1255,7 @@ fn parseArray(self: *@This(), comptime T: type, comptime options: ParseOptions, 
     // Check if the size matches
     if (element_nodes.len != Array.len) {
         const main_tokens = self.ast.nodes.items(.main_token);
-        return self.failExpectedType(T, main_tokens[node]);
+        return self.failExpectedContainer(T, main_tokens[node]);
     }
 
     // Parse the elements and return the array
@@ -1414,15 +1374,9 @@ test "std.zon arrays and slices" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst([0]u8, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName([0]u8), status.failure.reason.expected_type.type_name);
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 1,
-            .line_start = 0,
-            .line_end = 16,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:2: expected tuple with 0 fields", formatted);
     }
 
     // Expect 1 find 2
@@ -1431,15 +1385,9 @@ test "std.zon arrays and slices" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst([1]u8, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName([1]u8), status.failure.reason.expected_type.type_name);
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 1,
-            .line_start = 0,
-            .line_end = 11,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:2: expected tuple with 1 field", formatted);
     }
 
     // Expect 2 find 1
@@ -1448,15 +1396,9 @@ test "std.zon arrays and slices" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst([2]u8, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName([2]u8), status.failure.reason.expected_type.type_name);
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 1,
-            .line_start = 0,
-            .line_end = 6,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:2: expected tuple with 2 fields", formatted);
     }
 
     // Expect 3 find 0
@@ -1465,15 +1407,9 @@ test "std.zon arrays and slices" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst([3]u8, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName([3]u8), status.failure.reason.expected_type.type_name);
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 1,
-            .line_start = 0,
-            .line_end = 3,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:2: expected tuple with 3 fields", formatted);
     }
 
     // Wrong inner type
@@ -1484,15 +1420,9 @@ test "std.zon arrays and slices" {
             defer ast.deinit(gpa);
             var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([3]bool, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName(bool), status.failure.reason.expected_type.type_name);
-            const token = status.failure.token;
-            const location = ast.tokenLocation(0, token);
-            try std.testing.expectEqual(Ast.Location{
-                .line = 0,
-                .column = 2,
-                .line_start = 0,
-                .line_end = 16,
-            }, location);
+            const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+            defer gpa.free(formatted);
+            try std.testing.expectEqualStrings("1:3: expected bool", formatted);
         }
 
         // Slice
@@ -1501,15 +1431,9 @@ test "std.zon arrays and slices" {
             defer ast.deinit(gpa);
             var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([]bool, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName(bool), status.failure.reason.expected_type.type_name);
-            const token = status.failure.token;
-            const location = ast.tokenLocation(0, token);
-            try std.testing.expectEqual(Ast.Location{
-                .line = 0,
-                .column = 2,
-                .line_start = 0,
-                .line_end = 16,
-            }, location);
+            const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+            defer gpa.free(formatted);
+            try std.testing.expectEqualStrings("1:3: expected bool", formatted);
         }
     }
 
@@ -1521,15 +1445,9 @@ test "std.zon arrays and slices" {
             defer ast.deinit(gpa);
             var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([3]u8, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName([3]u8), status.failure.reason.expected_type.type_name);
-            const token = status.failure.token;
-            const location = ast.tokenLocation(0, token);
-            try std.testing.expectEqual(Ast.Location{
-                .line = 0,
-                .column = 0,
-                .line_start = 0,
-                .line_end = 3,
-            }, location);
+            const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+            defer gpa.free(formatted);
+            try std.testing.expectEqualStrings("1:1: expected tuple with 3 fields", formatted);
         }
 
         // Slice
@@ -1538,15 +1456,9 @@ test "std.zon arrays and slices" {
             defer ast.deinit(gpa);
             var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([]u8, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName([]u8), status.failure.reason.expected_type.type_name);
-            const token = status.failure.token;
-            const location = ast.tokenLocation(0, token);
-            try std.testing.expectEqual(Ast.Location{
-                .line = 0,
-                .column = 0,
-                .line_start = 0,
-                .line_end = 3,
-            }, location);
+            const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+            defer gpa.free(formatted);
+            try std.testing.expectEqualStrings("1:1: expected tuple", formatted);
         }
     }
 
@@ -1556,18 +1468,13 @@ test "std.zon arrays and slices" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst([3]bool, gpa, &ast, &status, .{}));
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 0,
-            .line_start = 0,
-            .line_end = 17,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:1: ZON cannot take the address of a value", formatted);
     }
 }
 
-fn parsePointer(self: *@This(), comptime T: type, comptime options: ParseOptions, node: NodeIndex) error{ OutOfMemory, Type }!T {
+fn parsePointer(self: *@This(), comptime T: type, comptime options: ParseOptions, node: NodeIndex) error{ ParserOutOfMemory, Type }!T {
     const tags = self.ast.nodes.items(.tag);
     return switch (tags[node]) {
         .string_literal => try self.parseStringLiteral(T, node),
@@ -1576,26 +1483,29 @@ fn parsePointer(self: *@This(), comptime T: type, comptime options: ParseOptions
     };
 }
 
-fn parseSlice(self: *@This(), comptime T: type, comptime options: ParseOptions, node: NodeIndex) error{ OutOfMemory, Type }!T {
+fn parseSlice(self: *@This(), comptime T: type, comptime options: ParseOptions, node: NodeIndex) error{ ParserOutOfMemory, Type }!T {
     const Ptr = @typeInfo(T).Pointer;
     // Make sure we're working with a slice
     switch (Ptr.size) {
-        .One, .Many, .C => @compileError(@typeName(T) ++ ": cannot parse pointers that are not slices"),
         .Slice => {},
+        .One, .Many, .C => @compileError(@typeName(T) ++ ": non slice pointers not supported"),
     }
 
     // Parse the array literal
+    const main_tokens = self.ast.nodes.items(.main_token);
     var buf: [2]NodeIndex = undefined;
     const element_nodes = try self.elements(T, &buf, node);
 
     // Allocate the slice
     const sentinel = if (Ptr.sentinel) |s| @as(*const Ptr.child, @ptrCast(s)).* else null;
-    const slice = try self.gpa.allocWithOptions(
+    const slice = self.gpa.allocWithOptions(
         Ptr.child,
         element_nodes.len,
         Ptr.alignment,
         sentinel,
-    );
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return self.failOutOfMemory(main_tokens[node]),
+    };
     errdefer self.gpa.free(slice);
 
     // Parse the elements and return the slice
@@ -1610,7 +1520,7 @@ fn parseSlice(self: *@This(), comptime T: type, comptime options: ParseOptions, 
     return slice;
 }
 
-fn parseStringLiteral(self: *@This(), comptime T: type, node: NodeIndex) !T {
+fn parseStringLiteral(self: *@This(), comptime T: type, node: NodeIndex) error{ ParserOutOfMemory, Type }!T {
     const Pointer = @typeInfo(T).Pointer;
 
     if (Pointer.size != .Slice) {
@@ -1622,26 +1532,36 @@ fn parseStringLiteral(self: *@This(), comptime T: type, node: NodeIndex) !T {
     const raw = self.ast.tokenSlice(token);
 
     if (Pointer.child != u8 or !Pointer.is_const or Pointer.alignment != 1) {
-        return self.failExpectedType(T, token);
+        return self.failExpectedContainer(T, token);
     }
     var buf = std.ArrayListUnmanaged(u8){};
     defer buf.deinit(self.gpa);
-    switch (try std.zig.string_literal.parseWrite(buf.writer(self.gpa), raw)) {
+    const parse_write_result = std.zig.string_literal.parseWrite(
+        buf.writer(self.gpa),
+        raw,
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return self.failOutOfMemory(token),
+    };
+    switch (parse_write_result) {
         .success => {},
         .failure => |reason| return self.failInvalidStringLiteral(token, reason),
     }
 
     if (Pointer.sentinel) |sentinel| {
         if (@as(*const u8, @ptrCast(sentinel)).* != 0) {
-            return self.failExpectedType(T, token);
+            return self.failExpectedContainer(T, token);
         }
-        return buf.toOwnedSliceSentinel(self.gpa, 0);
+        return buf.toOwnedSliceSentinel(self.gpa, 0) catch |err| switch (err) {
+            error.OutOfMemory => return self.failOutOfMemory(token),
+        };
     }
 
-    return buf.toOwnedSlice(self.gpa);
+    return buf.toOwnedSlice(self.gpa) catch |err| switch (err) {
+        error.OutOfMemory => return self.failOutOfMemory(token),
+    };
 }
 
-fn parseMultilineStringLiteral(self: *@This(), comptime T: type, node: NodeIndex) !T {
+fn parseMultilineStringLiteral(self: *@This(), comptime T: type, node: NodeIndex) error{ ParserOutOfMemory, Type }!T {
     const main_tokens = self.ast.nodes.items(.main_token);
 
     const Pointer = @typeInfo(T).Pointer;
@@ -1651,7 +1571,7 @@ fn parseMultilineStringLiteral(self: *@This(), comptime T: type, node: NodeIndex
     }
 
     if (Pointer.child != u8 or !Pointer.is_const or Pointer.alignment != 1) {
-        return self.failExpectedType(T, main_tokens[node]);
+        return self.failExpectedContainer(T, main_tokens[node]);
     }
 
     var buf = std.ArrayListUnmanaged(u8){};
@@ -1662,16 +1582,23 @@ fn parseMultilineStringLiteral(self: *@This(), comptime T: type, node: NodeIndex
     const data = self.ast.nodes.items(.data);
     var tok_i = data[node].lhs;
     while (tok_i <= data[node].rhs) : (tok_i += 1) {
-        try parser.line(self.ast.tokenSlice(tok_i));
+        const token_slice = self.ast.tokenSlice(tok_i);
+        parser.line(token_slice) catch |err| switch (err) {
+            error.OutOfMemory => return self.failOutOfMemory(tok_i),
+        };
     }
 
     if (Pointer.sentinel) |sentinel| {
         if (@as(*const u8, @ptrCast(sentinel)).* != 0) {
-            return self.failExpectedType(T, main_tokens[node]);
+            return self.failExpectedContainer(T, main_tokens[node]);
         }
-        return buf.toOwnedSliceSentinel(self.gpa, 0);
+        return buf.toOwnedSliceSentinel(self.gpa, 0) catch |err| switch (err) {
+            error.OutOfMemory => return self.failOutOfMemory(main_tokens[node]),
+        };
     } else {
-        return buf.toOwnedSlice(self.gpa);
+        return buf.toOwnedSlice(self.gpa) catch |err| switch (err) {
+            error.OutOfMemory => return self.failOutOfMemory(main_tokens[node]),
+        };
     }
 }
 
@@ -1706,15 +1633,9 @@ test "std.zon string literal" {
             defer ast.deinit(gpa);
             var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([]u8, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName([]u8), status.failure.reason.expected_type.type_name);
-            const token = status.failure.token;
-            const location = ast.tokenLocation(0, token);
-            try std.testing.expectEqual(Ast.Location{
-                .line = 0,
-                .column = 0,
-                .line_start = 0,
-                .line_end = 6,
-            }, location);
+            const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+            defer gpa.free(formatted);
+            try std.testing.expectEqualStrings("1:1: expected tuple", formatted);
         }
 
         {
@@ -1722,15 +1643,9 @@ test "std.zon string literal" {
             defer ast.deinit(gpa);
             var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([]u8, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName([]u8), status.failure.reason.expected_type.type_name);
-            const token = status.failure.token;
-            const location = ast.tokenLocation(0, token);
-            try std.testing.expectEqual(Ast.Location{
-                .line = 0,
-                .column = 0,
-                .line_start = 0,
-                .line_end = 6,
-            }, location);
+            const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+            defer gpa.free(formatted);
+            try std.testing.expectEqualStrings("1:1: expected tuple", formatted);
         }
     }
 
@@ -1741,15 +1656,9 @@ test "std.zon string literal" {
             defer ast.deinit(gpa);
             var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([4:0]u8, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName([4:0]u8), status.failure.reason.expected_type.type_name);
-            const token = status.failure.token;
-            const location = ast.tokenLocation(0, token);
-            try std.testing.expectEqual(Ast.Location{
-                .line = 0,
-                .column = 0,
-                .line_start = 0,
-                .line_end = 6,
-            }, location);
+            const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+            defer gpa.free(formatted);
+            try std.testing.expectEqualStrings("1:1: expected tuple with 4 fields", formatted);
         }
 
         {
@@ -1757,15 +1666,9 @@ test "std.zon string literal" {
             defer ast.deinit(gpa);
             var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([4:0]u8, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName([4:0]u8), status.failure.reason.expected_type.type_name);
-            const token = status.failure.token;
-            const location = ast.tokenLocation(0, token);
-            try std.testing.expectEqual(Ast.Location{
-                .line = 0,
-                .column = 0,
-                .line_start = 0,
-                .line_end = 6,
-            }, location);
+            const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+            defer gpa.free(formatted);
+            try std.testing.expectEqualStrings("1:1: expected tuple with 4 fields", formatted);
         }
     }
 
@@ -1793,15 +1696,9 @@ test "std.zon string literal" {
             defer ast.deinit(gpa);
             var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([:1]const u8, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName([:1]const u8), status.failure.reason.expected_type.type_name);
-            const token = status.failure.token;
-            const location = ast.tokenLocation(0, token);
-            try std.testing.expectEqual(Ast.Location{
-                .line = 0,
-                .column = 0,
-                .line_start = 0,
-                .line_end = 5,
-            }, location);
+            const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+            defer gpa.free(formatted);
+            try std.testing.expectEqualStrings("1:1: expected tuple", formatted);
         }
 
         {
@@ -1809,16 +1706,32 @@ test "std.zon string literal" {
             defer ast.deinit(gpa);
             var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([:1]const u8, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName([:1]const u8), status.failure.reason.expected_type.type_name);
-            const token = status.failure.token;
-            const location = ast.tokenLocation(0, token);
-            try std.testing.expectEqual(Ast.Location{
-                .line = 0,
-                .column = 0,
-                .line_start = 0,
-                .line_end = 5,
-            }, location);
+            const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+            defer gpa.free(formatted);
+            try std.testing.expectEqualStrings("1:1: expected tuple", formatted);
         }
+    }
+
+    // Expecting string literal, getting something else
+    {
+        var ast = try std.zig.Ast.parse(gpa, "true", .zon);
+        defer ast.deinit(gpa);
+        var status: ParseStatus = undefined;
+        try std.testing.expectError(error.Type, parseFromAst([]const u8, gpa, &ast, &status, .{}));
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:1: expected string", formatted);
+    }
+
+    // Expecting string literal, getting an incompatible tuple
+    {
+        var ast = try std.zig.Ast.parse(gpa, ".{false}", .zon);
+        defer ast.deinit(gpa);
+        var status: ParseStatus = undefined;
+        try std.testing.expectError(error.Type, parseFromAst([]const u8, gpa, &ast, &status, .{}));
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:3: expected u8", formatted);
     }
 
     // Invalid string literal
@@ -1827,14 +1740,9 @@ test "std.zon string literal" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst([]const u8, gpa, &ast, &status, .{}));
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 0,
-            .line_start = 0,
-            .line_end = 4,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:3: invalid escape character: 'a'", formatted);
     }
 
     // Slice wrong child type
@@ -1844,15 +1752,9 @@ test "std.zon string literal" {
             defer ast.deinit(gpa);
             var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([]const i8, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName([]const i8), status.failure.reason.expected_type.type_name);
-            const token = status.failure.token;
-            const location = ast.tokenLocation(0, token);
-            try std.testing.expectEqual(Ast.Location{
-                .line = 0,
-                .column = 0,
-                .line_start = 0,
-                .line_end = 3,
-            }, location);
+            const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+            defer gpa.free(formatted);
+            try std.testing.expectEqualStrings("1:1: expected tuple", formatted);
         }
 
         {
@@ -1860,15 +1762,9 @@ test "std.zon string literal" {
             defer ast.deinit(gpa);
             var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([]const i8, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName([]const i8), status.failure.reason.expected_type.type_name);
-            const token = status.failure.token;
-            const location = ast.tokenLocation(0, token);
-            try std.testing.expectEqual(Ast.Location{
-                .line = 0,
-                .column = 0,
-                .line_start = 0,
-                .line_end = 3,
-            }, location);
+            const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+            defer gpa.free(formatted);
+            try std.testing.expectEqualStrings("1:1: expected tuple", formatted);
         }
     }
 
@@ -1879,15 +1775,9 @@ test "std.zon string literal" {
             defer ast.deinit(gpa);
             var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([]align(2) const u8, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName([]align(2) const u8), status.failure.reason.expected_type.type_name);
-            const token = status.failure.token;
-            const location = ast.tokenLocation(0, token);
-            try std.testing.expectEqual(Ast.Location{
-                .line = 0,
-                .column = 0,
-                .line_start = 0,
-                .line_end = 5,
-            }, location);
+            const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+            defer gpa.free(formatted);
+            try std.testing.expectEqualStrings("1:1: expected tuple", formatted);
         }
 
         {
@@ -1895,15 +1785,9 @@ test "std.zon string literal" {
             defer ast.deinit(gpa);
             var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([]align(2) const u8, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName([]align(2) const u8), status.failure.reason.expected_type.type_name);
-            const token = status.failure.token;
-            const location = ast.tokenLocation(0, token);
-            try std.testing.expectEqual(Ast.Location{
-                .line = 0,
-                .column = 0,
-                .line_start = 0,
-                .line_end = 5,
-            }, location);
+            const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+            defer gpa.free(formatted);
+            try std.testing.expectEqualStrings("1:1: expected tuple", formatted);
         }
     }
 
@@ -1958,14 +1842,11 @@ fn parseEnumLiteral(self: @This(), comptime T: type, node: NodeIndex) error{Type
             const enum_tags = std.StaticStringMap(T).initComptime(kvs_list);
 
             // Get the tag if it exists
-            const bytes = self.parseIdent(token) catch |err| switch (err) {
-                error.IdentTooLong => return self.failCannotRepresent(T, token),
-                else => |e| return e,
-            };
+            const bytes = try self.parseIdent(T, token);
             return enum_tags.get(bytes) orelse
-                self.failCannotRepresent(T, token);
+                self.failUnexpectedField(T, token);
         },
-        else => return self.failExpectedType(T, token),
+        else => return self.fail(token, .expected_enum),
     }
 }
 
@@ -1973,7 +1854,7 @@ fn parseEnumLiteral(self: @This(), comptime T: type, node: NodeIndex) error{Type
 // previous results.
 // The resulting bytes may reference a buffer on `self` that can be reused in future calls to
 // `parseIdent`. They should only be held onto temporarily.
-fn parseIdent(self: @This(), token: TokenIndex) error{ Type, IdentTooLong }![]const u8 {
+fn parseIdent(self: @This(), T: type, token: TokenIndex) error{Type}![]const u8 {
     var unparsed = self.ast.tokenSlice(token);
 
     if (unparsed[0] == '@' and unparsed[1] == '"') {
@@ -1983,17 +1864,15 @@ fn parseIdent(self: @This(), token: TokenIndex) error{ Type, IdentTooLong }![]co
 
         const raw = unparsed[1..unparsed.len];
         const result = std.zig.string_literal.parseWrite(parsed.writer(alloc), raw) catch |err| switch (err) {
-            error.OutOfMemory => return error.IdentTooLong,
+            // If it's too long for our preallocated buffer, it must be incorrect
+            error.OutOfMemory => return self.failUnexpectedField(T, token),
         };
         switch (result) {
             .failure => |reason| return self.failInvalidStringLiteral(token, reason),
             .success => {},
         }
         if (std.mem.indexOfScalar(u8, parsed.items, 0) != null) {
-            return self.fail(.{
-                .token = token,
-                .reason = .ident_embedded_null,
-            });
+            return self.failUnexpectedField(T, token);
         }
         return parsed.items;
     }
@@ -2023,15 +1902,9 @@ test "std.zon enum literals" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Enum, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(status.failure.reason.cannot_represent.type_name, @typeName(Enum));
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 1,
-            .line_start = 0,
-            .line_end = 4,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:2: unexpected field, supported fields: foo, bar, baz, @\"ab\\nc\"", formatted);
     }
 
     // Bad tag that's too long for parser
@@ -2040,15 +1913,9 @@ test "std.zon enum literals" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Enum, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(status.failure.reason.cannot_represent.type_name, @typeName(Enum));
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 1,
-            .line_start = 0,
-            .line_end = 13,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:2: unexpected field, supported fields: foo, bar, baz, @\"ab\\nc\"", formatted);
     }
 
     // Bad type
@@ -2057,15 +1924,9 @@ test "std.zon enum literals" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Enum, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Enum), status.failure.reason.expected_type.type_name);
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 0,
-            .line_start = 0,
-            .line_end = 4,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:1: expected enum literal", formatted);
     }
 
     // Test embedded nulls in an identifier
@@ -2074,108 +1935,111 @@ test "std.zon enum literals" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(enum { a }, gpa, &ast, &status, .{}));
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 1,
-            .line_start = 0,
-            .line_end = 8,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:2: unexpected field, supported fields: a", formatted);
     }
 }
 
-fn fail(self: @This(), failure: ParseFailure) error{Type} {
+fn fail(self: @This(), token: TokenIndex, reason: ParseFailure.Reason) error{Type} {
     @setCold(true);
-    if (self.status) |s| s.* = .{ .failure = failure };
+    if (self.status) |s| s.* = .{ .failure = .{
+        .ast = self.ast,
+        .token = token,
+        .reason = reason,
+    } };
     return error.Type;
+}
+
+fn failOutOfMemory(self: *@This(), token: TokenIndex) error{ParserOutOfMemory} {
+    // Set our failure state, but ignore the type error because users may want to handle out of
+    // memory separately from other input errors
+    self.fail(token, .out_of_memory) catch {};
+
+    // We don't return error.OutOfMemory directly so that we can't forget to call this function,
+    // this error will be converted to error.OutOfMemory before returning to the user
+    return error.ParserOutOfMemory;
 }
 
 fn failInvalidStringLiteral(self: @This(), token: TokenIndex, err: StringLiteralError) error{Type} {
     @setCold(true);
-    return self.fail(.{
-        .token = token,
-        .reason = .{
-            .invalid_string_literal = .{
-                .err = err,
-            },
-        },
+    return self.fail(token, .{
+        .invalid_string_literal = .{ .err = err },
     });
 }
 
 fn failInvalidNumberLiteral(self: @This(), token: TokenIndex, err: NumberLiteralError) error{Type} {
     @setCold(true);
-    return self.fail(.{
-        .token = token,
-        .reason = .{ .invalid_number_literal = .{
-            .err = err,
-        } },
-    });
-}
-
-fn failExpectedType(self: @This(), comptime T: type, token: TokenIndex) error{Type} {
-    @setCold(true);
-    return self.fail(.{
-        .token = token,
-        .reason = .{ .expected_type = .{
-            .type_name = @typeName(T),
-        } },
+    return self.fail(token, .{
+        .invalid_number_literal = .{ .err = err },
     });
 }
 
 fn failCannotRepresent(self: @This(), comptime T: type, token: TokenIndex) error{Type} {
     @setCold(true);
-    return self.fail(.{
-        .token = token,
-        .reason = .{ .cannot_represent = .{
-            .type_name = @typeName(T),
-        } },
+    return self.fail(token, .{
+        .cannot_represent = .{ .type_name = @typeName(T) },
     });
 }
 
 fn failNegativeIntegerZero(self: @This(), token: TokenIndex) error{Type} {
     @setCold(true);
-    return self.fail(.{
-        .token = token,
-        .reason = .negative_integer_zero,
-    });
+    return self.fail(token, .negative_integer_zero);
 }
 
-fn failUnknownField(self: @This(), comptime T: type, token: TokenIndex) error{Type} {
+fn failUnexpectedField(self: @This(), T: type, token: TokenIndex) error{Type} {
     @setCold(true);
-    return self.fail(.{
-        .token = token,
-        .reason = .{ .unknown_field = .{
-            .type_name = @typeName(T),
-        } },
-    });
+    switch (@typeInfo(T)) {
+        .Struct, .Union, .Enum => return self.fail(token, .{ .unexpected_field = .{
+            .fields = std.meta.fieldNames(T),
+        } }),
+        else => @compileError("unreachable, should not be called for type " ++ @typeName(T)),
+    }
 }
 
-fn failMissingField(self: @This(), comptime T: type, name: []const u8, token: TokenIndex) error{Type} {
+fn failExpectedContainer(self: @This(), T: type, token: TokenIndex) error{Type} {
     @setCold(true);
-    return self.fail(.{
-        .token = token,
-        .reason = .{ .missing_field = .{
-            .type_name = @typeName(T),
-            .field_name = name,
-        } },
-    });
+    switch (@typeInfo(T)) {
+        .Struct => |Struct| if (Struct.is_tuple) {
+            return self.fail(token, .{ .expected_tuple_with_fields = .{
+                .fields = Struct.fields.len,
+            } });
+        } else {
+            return self.fail(token, .expected_struct);
+        },
+        .Union => return self.fail(token, .expected_union),
+        .Array => |Array| return self.fail(token, .{ .expected_tuple_with_fields = .{
+            .fields = Array.len,
+        } }),
+        .Pointer => |Pointer| {
+            if (Pointer.child == u8 and
+                Pointer.size == .Slice and
+                Pointer.is_const and
+                (Pointer.sentinel == null or @as(*const u8, @ptrCast(Pointer.sentinel)).* == 0) and
+                Pointer.alignment == 1)
+            {
+                return self.fail(token, .expected_string);
+            } else {
+                return self.fail(token, .expected_tuple);
+            }
+        },
+        else => @compileError("unreachable, should not be called for type " ++ @typeName(T)),
+    }
+}
+
+fn failMissingField(self: @This(), name: []const u8, token: TokenIndex) error{Type} {
+    @setCold(true);
+    return self.fail(token, .{ .missing_field = .{ .field_name = name } });
 }
 
 fn failDuplicateField(self: @This(), token: TokenIndex) error{Type} {
     @setCold(true);
-    return self.fail(.{
-        .token = token,
-        .reason = .duplicate_field,
-    });
+    return self.fail(token, .duplicate_field);
 }
 
 fn failTypeExpr(self: @This(), token: TokenIndex) error{Type} {
     @setCold(true);
-    return self.fail(.{
-        .token = token,
-        .reason = .type_expr,
-    });
+    return self.fail(token, .type_expr);
 }
 
 fn parseBool(self: @This(), node: NodeIndex) error{Type}!bool {
@@ -2195,7 +2059,7 @@ fn parseBool(self: @This(), node: NodeIndex) error{Type}!bool {
         },
         else => {},
     }
-    return self.failExpectedType(bool, token);
+    return self.fail(token, .{ .expected_primitive = .{ .type_name = "bool" } });
 }
 
 test "std.zon parse bool" {
@@ -2211,30 +2075,18 @@ test "std.zon parse bool" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(bool, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(bool), status.failure.reason.expected_type.type_name);
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 1,
-            .line_start = 0,
-            .line_end = 4,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:2: expected bool", formatted);
     }
     {
         var ast = try std.zig.Ast.parse(gpa, "123", .zon);
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(bool, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(bool), status.failure.reason.expected_type.type_name);
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 0,
-            .line_start = 0,
-            .line_end = 3,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:1: expected bool", formatted);
     }
 }
 
@@ -2273,7 +2125,9 @@ fn parseNumber(
         },
         else => {},
     }
-    return self.failExpectedType(T, main_tokens[num_lit_node]);
+    return self.fail(main_tokens[node], .{
+        .expected_primitive = .{ .type_name = @typeName(T) },
+    });
 }
 
 fn parseNumberLiteral(self: @This(), comptime T: type, node: NodeIndex) error{Type}!T {
@@ -2486,30 +2340,18 @@ test "std.zon parse int" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(i66, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(status.failure.reason.cannot_represent.type_name, @typeName(i66));
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 0,
-            .line_start = 0,
-            .line_end = 20,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:1: i66 cannot represent value", formatted);
     }
     {
         var ast = try std.zig.Ast.parse(gpa, "-36893488147419103233", .zon);
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(i66, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(status.failure.reason.cannot_represent.type_name, @typeName(i66));
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 0,
-            .line_start = 0,
-            .line_end = 21,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:1: i66 cannot represent value", formatted);
     }
 
     // Test parsing whole number floats as integers
@@ -2586,20 +2428,9 @@ test "std.zon parse int" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(u8, gpa, &ast, &status, .{}));
-        try std.testing.expectEqual(status.failure.reason.invalid_number_literal.err, NumberLiteralError{
-            .invalid_digit = .{
-                .i = 2,
-                .base = @as(Base, @enumFromInt(10)),
-            },
-        });
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 0,
-            .line_start = 0,
-            .line_end = 5,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:3: invalid digit 'a' for decimal base", formatted);
     }
 
     // Failing to parse as int
@@ -2608,15 +2439,9 @@ test "std.zon parse int" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(u8, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(u8), status.failure.reason.expected_type.type_name);
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 0,
-            .line_start = 0,
-            .line_end = 4,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:1: expected u8", formatted);
     }
 
     // Failing because an int is out of range
@@ -2625,15 +2450,9 @@ test "std.zon parse int" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(u8, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(status.failure.reason.cannot_represent.type_name, @typeName(u8));
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 0,
-            .line_start = 0,
-            .line_end = 3,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:1: u8 cannot represent value", formatted);
     }
 
     // Failing because a negative int is out of range
@@ -2642,15 +2461,9 @@ test "std.zon parse int" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(i8, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(status.failure.reason.cannot_represent.type_name, @typeName(i8));
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 0,
-            .line_start = 0,
-            .line_end = 4,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:1: i8 cannot represent value", formatted);
     }
 
     // Failing because an unsigned int is negative
@@ -2659,15 +2472,9 @@ test "std.zon parse int" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(u8, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(status.failure.reason.cannot_represent.type_name, @typeName(u8));
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 0,
-            .line_start = 0,
-            .line_end = 2,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:1: u8 cannot represent value", formatted);
     }
 
     // Failing because a float is non-whole
@@ -2676,15 +2483,9 @@ test "std.zon parse int" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(u8, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(status.failure.reason.cannot_represent.type_name, @typeName(u8));
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 0,
-            .line_start = 0,
-            .line_end = 3,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:1: u8 cannot represent value", formatted);
     }
 
     // Failing because a float is negative
@@ -2693,15 +2494,9 @@ test "std.zon parse int" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(u8, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(status.failure.reason.cannot_represent.type_name, @typeName(u8));
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 0,
-            .line_start = 0,
-            .line_end = 4,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:1: u8 cannot represent value", formatted);
     }
 
     // Negative integer zero
@@ -2710,14 +2505,9 @@ test "std.zon parse int" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(i8, gpa, &ast, &status, .{}));
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 0,
-            .line_start = 0,
-            .line_end = 2,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:1: integer literal '-0' is ambiguous", formatted);
     }
 
     // Negative integer zero casted to float
@@ -2726,14 +2516,9 @@ test "std.zon parse int" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(f32, gpa, &ast, &status, .{}));
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 0,
-            .line_start = 0,
-            .line_end = 2,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:1: integer literal '-0' is ambiguous", formatted);
     }
 
     // Negative float 0 is allowed
@@ -2746,15 +2531,9 @@ test "std.zon parse int" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(i8, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(i8), status.failure.reason.expected_type.type_name);
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 1,
-            .line_start = 0,
-            .line_end = 3,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:1: expected i8", formatted);
     }
 
     {
@@ -2762,15 +2541,20 @@ test "std.zon parse int" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(f32, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(f32), status.failure.reason.expected_type.type_name);
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 1,
-            .line_start = 0,
-            .line_end = 5,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:1: expected f32", formatted);
+    }
+
+    // Invalid int literal
+    {
+        var ast = try std.zig.Ast.parse(gpa, "0xg", .zon);
+        defer ast.deinit(gpa);
+        var status: ParseStatus = undefined;
+        try std.testing.expectError(error.Type, parseFromAst(u8, gpa, &ast, &status, .{}));
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:3: invalid digit 'g' for hex base", formatted);
     }
 }
 
@@ -2839,15 +2623,9 @@ test "std.zon parse float" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(f32, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(f32), status.failure.reason.expected_type.type_name);
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 0,
-            .line_start = 0,
-            .line_end = 3,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:1: expected f32", formatted);
     }
 
     {
@@ -2855,15 +2633,9 @@ test "std.zon parse float" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(f32, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(f32), status.failure.reason.expected_type.type_name);
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 1,
-            .line_start = 0,
-            .line_end = 4,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:1: expected f32", formatted);
     }
 
     // Non float as float
@@ -2872,15 +2644,9 @@ test "std.zon parse float" {
         defer ast.deinit(gpa);
         var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(f32, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(f32), status.failure.reason.expected_type.type_name);
-        const token = status.failure.token;
-        const location = ast.tokenLocation(0, token);
-        try std.testing.expectEqual(Ast.Location{
-            .line = 0,
-            .column = 0,
-            .line_start = 0,
-            .line_end = 5,
-        }, location);
+        const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
+        defer gpa.free(formatted);
+        try std.testing.expectEqualStrings("1:1: expected f32", formatted);
     }
 }
 

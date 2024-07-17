@@ -463,13 +463,12 @@ const Parse = struct {
         buf.* = buf_managed.moveToUnmanaged();
         switch (try result) {
             .success => {},
-            .failure => |err| try AstGen.failWithStrLitError(
+            .failure => |err| try appendErrorOff(
                 p,
-                Parse.appendErrorOff,
-                err,
                 token,
-                bytes,
-                offset,
+                offset + @as(u32, @intCast(err.offset())),
+                "{}",
+                err.fmtWithSource(raw_string),
             ),
         }
     }

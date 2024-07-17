@@ -37,7 +37,69 @@ pub const Error = union(enum) {
     expected_single_quote: usize,
     /// The character at this index cannot be represented without an escape sequence.
     invalid_character: usize,
+
+    pub fn fmtWithSource(self: Error, raw_string: []const u8) std.fmt.Formatter(formatErrorWithSource) {
+        return .{ .data = .{ .err = self, .raw_string = raw_string } };
+    }
+
+    pub fn offset(self: Error) usize {
+        return switch (self) {
+            .invalid_escape_character => |i| i,
+            .expected_hex_digit => |i| i,
+            .empty_unicode_escape_sequence => |i| i,
+            .expected_hex_digit_or_rbrace => |i| i,
+            .invalid_unicode_codepoint => |i| i,
+            .expected_lbrace => |i| i,
+            .expected_rbrace => |i| i,
+            .expected_single_quote => |i| i,
+            .invalid_character => |i| i,
+        };
+    }
 };
+
+const FormatWithSource = struct {
+    raw_string: []const u8,
+    err: Error,
+};
+
+fn formatErrorWithSource(
+    self: FormatWithSource,
+    comptime fmt: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = options;
+    _ = fmt;
+    switch (self.err) {
+        .invalid_escape_character => |bad_index| {
+            try writer.print("invalid escape character: '{c}'", .{self.raw_string[bad_index]});
+        },
+        .expected_hex_digit => |bad_index| {
+            try writer.print("expected hex digit, found '{c}'", .{self.raw_string[bad_index]});
+        },
+        .empty_unicode_escape_sequence => {
+            try writer.writeAll("empty unicode escape sequence");
+        },
+        .expected_hex_digit_or_rbrace => |bad_index| {
+            try writer.print("expected hex digit or '}}', found '{c}'", .{self.raw_string[bad_index]});
+        },
+        .invalid_unicode_codepoint => {
+            try writer.writeAll("unicode escape does not correspond to a valid unicode scalar value");
+        },
+        .expected_lbrace => |bad_index| {
+            try writer.print("expected '{{', found '{c}", .{self.raw_string[bad_index]});
+        },
+        .expected_rbrace => |bad_index| {
+            try writer.print("expected '}}', found '{c}", .{self.raw_string[bad_index]});
+        },
+        .expected_single_quote => |bad_index| {
+            try writer.print("expected single quote ('), found '{c}", .{self.raw_string[bad_index]});
+        },
+        .invalid_character => |bad_index| {
+            try writer.print("invalid byte in string or character literal: '{c}'", .{self.raw_string[bad_index]});
+        },
+    }
+}
 
 /// Only validates escape sequence characters.
 /// Slice must be valid utf8 starting and ending with "'" and exactly one codepoint in between.
