@@ -25,59 +25,42 @@ pub const ParseOptions = struct {
 };
 
 /// Information about the success or failure of a parse.
-pub const ParseStatus = union(enum) {
-    /// The parse succeeded.
+pub const ParseStatus = union {
     success: void,
-    /// Expected `type_name` at `node`, but found something incompatible.
-    expected_type: struct {
-        type_name: []const u8,
-        node: NodeIndex,
-    },
-    /// Numerical or enum `type_name` cannot represent the value at `node`.
-    cannot_represent: struct {
-        type_name: []const u8,
-        node: NodeIndex,
-    },
-    /// The integer literal at `node` is negative 0.
-    negative_integer_zero: struct {
-        node: NodeIndex,
-    },
-    /// The string literal at `node` failed to parse with `reason`.
-    invalid_string_literal: struct {
-        token: TokenIndex,
-        reason: StringLiteralError,
-    },
-    /// The number literal at `node` failed to parse with `reason`.
-    invalid_number_literal: struct {
-        node: NodeIndex,
-        reason: NumberLiteralError,
-    },
-    /// The field at `token` does not exist on type `type_name`, and `ignore_unknpwn_fields` is
-    /// false.
-    unknown_field: struct {
-        token: TokenIndex,
-        type_name: []const u8,
-    },
-    /// The struct `type_name` at `node` is missing field `field_name`, and it has no default.
-    missing_field: struct {
-        node: NodeIndex,
-        type_name: []const u8,
-        field_name: []const u8,
-    },
-    /// The field at `token` is a duplicate.
-    duplicate_field: struct {
-        token: TokenIndex,
-    },
-    /// A type expression was encountered at `node`.
-    type_expr: struct {
-        node: NodeIndex,
-    },
-    /// An identifier found at `token` contains an embedded null.
-    ident_embedded_null: struct {
-        token: TokenIndex,
-    },
-    address_of: struct {
-        node: NodeIndex,
+    failure: ParseFailure,
+};
+
+/// Information about a parse failure. Intended to be displayed to the user via the default
+/// formatter, inner representation may change.
+pub const ParseFailure = struct {
+    token: TokenIndex,
+
+    reason: union(enum) {
+        out_of_memory: void,
+        expected_type: struct {
+            type_name: []const u8,
+        },
+        cannot_represent: struct {
+            type_name: []const u8,
+        },
+        negative_integer_zero: void,
+        invalid_string_literal: struct {
+            err: StringLiteralError,
+        },
+        invalid_number_literal: struct {
+            err: NumberLiteralError,
+        },
+        unknown_field: struct {
+            type_name: []const u8,
+        },
+        missing_field: struct {
+            type_name: []const u8,
+            field_name: []const u8,
+        },
+        duplicate_field: void,
+        type_expr: void,
+        ident_embedded_null: void,
+        address_of: void,
     },
 };
 
@@ -125,12 +108,11 @@ test "std.zon parseFromSlice syntax error" {
 /// Like `parseFromSlice`, but operates on an AST instead of on ZON source.
 ///
 /// Returns `error.OutOfMemory` if allocation fails, or `error.Type` if the ZON could not be
-/// deserialized into `T`. If `status` is not null, more information about the success/failure of the
-/// parse will be stored in it.
+/// deserialized into `T`.
+///
+/// If `status` is not null, its success field will be set on success, and its failure field will be
+/// set on failure.
 pub fn parseFromAst(comptime T: type, gpa: Allocator, ast: *const Ast, status: ?*ParseStatus, comptime options: ParseOptions) error{ OutOfMemory, Type }!T {
-    if (status) |s| {
-        s.* = .success;
-    }
     assert(ast.errors.len == 0);
     const data = ast.nodes.items(.data);
     const root = data[0].lhs;
@@ -167,7 +149,28 @@ pub fn parseFromAstNode(comptime T: type, gpa: Allocator, ast: *const Ast, node:
         .status = status,
         .ident_buf = &ident_buf,
     };
-    return parser.parseExpr(T, options, node);
+
+    // Attempt the parse, setting status and returning early if it fails
+    const result = parser.parseExpr(T, options, node) catch |err| switch (err) {
+        error.OutOfMemory => {
+            // Set status to out of memory
+            if (status) |s| s.* = .{
+                .failure = .{
+                    .token = 0,
+                    .reason = .out_of_memory,
+                },
+            };
+            return err;
+        },
+        error.Type => {
+            // Status was already set when returning this error
+            return err;
+        },
+    };
+
+    // Set status to success and return the result
+    if (status) |s| s.* = .{ .success = {} };
+    return result;
 }
 
 /// Like `parseFromAstNode`, but does not take an allocator.
@@ -388,7 +391,12 @@ fn parseExpr(
     // that the type is wrong, which may be confusing.)
     const tags = self.ast.nodes.items(.tag);
     if (tags[node] == .address_of) {
-        return self.fail(.{ .address_of = .{ .node = node } });
+        const main_tokens = self.ast.nodes.items(.main_token);
+        const token = main_tokens[node];
+        return self.fail(.{
+            .token = token,
+            .reason = .address_of,
+        });
     }
 
     // Keep in sync with parseFree, stringify, and requiresAllocator.
@@ -411,16 +419,18 @@ fn parseExpr(
 }
 
 fn parseVoid(self: @This(), node: NodeIndex) error{ OutOfMemory, Type }!void {
+    const main_tokens = self.ast.nodes.items(.main_token);
+    const token = main_tokens[node];
     const tags = self.ast.nodes.items(.tag);
     const data = self.ast.nodes.items(.data);
     switch (tags[node]) {
         .block_two => if (data[node].lhs != 0 or data[node].rhs != 0) {
-            return self.failExpectedType(void, node);
+            return self.failExpectedType(void, token);
         },
         .block => if (data[node].lhs != data[node].rhs) {
-            return self.failExpectedType(void, node);
+            return self.failExpectedType(void, token);
         },
-        else => return self.failExpectedType(void, node),
+        else => return self.failExpectedType(void, token),
     }
 }
 
@@ -438,12 +448,10 @@ test "std.zon void" {
     {
         var ast = try std.zig.Ast.parse(gpa, "123", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(void, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(void), status.expected_type.type_name);
-        const node = status.expected_type.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(@typeName(void), status.failure.reason.expected_type.type_name);
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -514,7 +522,7 @@ fn parseUnion(self: *@This(), comptime T: type, comptime options: ParseOptions, 
     if (tags[node] == .enum_literal) {
         // The union must be tagged for an enum literal to coerce to it
         if (Union.tag_type == null) {
-            return self.failExpectedType(T, node);
+            return self.failExpectedType(T, main_tokens[node]);
         }
 
         // Get the index of the named field. We don't use `parseEnum` here as
@@ -534,7 +542,7 @@ fn parseUnion(self: *@This(), comptime T: type, comptime options: ParseOptions, 
             inline 0...field_infos.len - 1 => |i| {
                 // Fail if the field is not void
                 if (field_infos[i].type != void)
-                    return self.failExpectedType(T, node);
+                    return self.failExpectedType(T, main_tokens[node]);
 
                 // Instantiate the union
                 return @unionInit(T, field_infos[i].name, {});
@@ -543,10 +551,10 @@ fn parseUnion(self: *@This(), comptime T: type, comptime options: ParseOptions, 
         }
     } else {
         var buf: [2]NodeIndex = undefined;
-        const field_nodes = try self.elementsOrFields(T, &buf, node);
+        const field_nodes = try self.fields(T, &buf, node);
 
         if (field_nodes.len != 1) {
-            return self.failExpectedType(T, node);
+            return self.failExpectedType(T, main_tokens[node]);
         }
 
         // Fill in the field we found
@@ -615,11 +623,11 @@ test "std.zon unions" {
         const Union = union { x: f32, y: f32 };
         var ast = try std.zig.Ast.parse(gpa, ".{.z=2.5}", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Union, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Union), status.unknown_field.type_name);
-        try std.testing.expectEqualStrings("z", ast.tokenSlice(status.unknown_field.token));
-        const token = status.unknown_field.token;
+        try std.testing.expectEqualStrings(@typeName(Union), status.failure.reason.unknown_field.type_name);
+        try std.testing.expectEqualStrings("z", ast.tokenSlice(status.failure.token));
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -634,11 +642,11 @@ test "std.zon unions" {
         const Union = union { x: f32, y: f32 };
         var ast = try std.zig.Ast.parse(gpa, ".{.@\"abc\"=2.5}", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Union, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Union), status.unknown_field.type_name);
-        try std.testing.expectEqualStrings("@\"abc\"", ast.tokenSlice(status.unknown_field.token));
-        const token = status.unknown_field.token;
+        try std.testing.expectEqualStrings(@typeName(Union), status.failure.reason.unknown_field.type_name);
+        try std.testing.expectEqualStrings("@\"abc\"", ast.tokenSlice(status.failure.token));
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -653,12 +661,10 @@ test "std.zon unions" {
         const Union = union { x: f32, y: bool };
         var ast = try std.zig.Ast.parse(gpa, ".{.x = 1.5, .y = true}", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Union, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Union), status.expected_type.type_name);
-        const node = status.expected_type.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(@typeName(Union), status.failure.reason.expected_type.type_name);
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -673,12 +679,10 @@ test "std.zon unions" {
         const Union = union { x: f32, y: bool };
         var ast = try std.zig.Ast.parse(gpa, ".{}", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Union, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Union), status.expected_type.type_name);
-        const node = status.expected_type.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(@typeName(Union), status.failure.reason.expected_type.type_name);
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -693,12 +697,10 @@ test "std.zon unions" {
         const Union = union { x: void };
         var ast = try std.zig.Ast.parse(gpa, ".x", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Union, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Union), status.expected_type.type_name);
-        const node = status.expected_type.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(@typeName(Union), status.failure.reason.expected_type.type_name);
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -713,11 +715,11 @@ test "std.zon unions" {
         const Union = union(enum) { x: void };
         var ast = try std.zig.Ast.parse(gpa, ".y", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Union, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Union), status.unknown_field.type_name);
-        try std.testing.expectEqualStrings("y", ast.tokenSlice(status.unknown_field.token));
-        const token = status.unknown_field.token;
+        try std.testing.expectEqualStrings(@typeName(Union), status.failure.reason.unknown_field.type_name);
+        try std.testing.expectEqualStrings("y", ast.tokenSlice(status.failure.token));
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -732,11 +734,11 @@ test "std.zon unions" {
         const Union = union(enum) { x: void };
         var ast = try std.zig.Ast.parse(gpa, ".@\"abc\"", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Union, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Union), status.unknown_field.type_name);
-        try std.testing.expectEqualStrings("@\"abc\"", ast.tokenSlice(status.unknown_field.token));
-        const token = status.unknown_field.token;
+        try std.testing.expectEqualStrings(@typeName(Union), status.failure.reason.unknown_field.type_name);
+        try std.testing.expectEqualStrings("@\"abc\"", ast.tokenSlice(status.failure.token));
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -751,12 +753,10 @@ test "std.zon unions" {
         const Union = union(enum) { x: f32 };
         var ast = try std.zig.Ast.parse(gpa, ".x", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Union, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Union), status.expected_type.type_name);
-        const node = status.expected_type.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(@typeName(Union), status.failure.reason.expected_type.type_name);
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -776,25 +776,66 @@ test "std.zon unions" {
     }
 }
 
-fn elementsOrFields(
+fn elements(
     self: @This(),
     comptime T: type,
     buf: *[2]NodeIndex,
     node: NodeIndex,
 ) error{Type}![]const NodeIndex {
-    if (self.ast.fullStructInit(buf, node)) |init| {
+    const main_tokens = self.ast.nodes.items(.main_token);
+
+    // Attempt to parse as an array
+    if (self.ast.fullArrayInit(buf, node)) |init| {
         if (init.ast.type_expr != 0) {
-            return self.failTypeExpr(init.ast.type_expr);
-        }
-        return init.ast.fields;
-    } else if (self.ast.fullArrayInit(buf, node)) |init| {
-        if (init.ast.type_expr != 0) {
-            return self.failTypeExpr(init.ast.type_expr);
+            return self.failTypeExpr(main_tokens[init.ast.type_expr]);
         }
         return init.ast.elements;
-    } else {
-        return self.failExpectedType(T, node);
     }
+
+    // Attempt to parse as a struct with no fields
+    if (self.ast.fullStructInit(buf, node)) |init| {
+        if (init.ast.type_expr != 0) {
+            return self.failTypeExpr(main_tokens[init.ast.type_expr]);
+        }
+        if (init.ast.fields.len != 0) {
+            return self.failExpectedType(T, main_tokens[node]);
+        }
+        return init.ast.fields;
+    }
+
+    // Fail
+    return self.failExpectedType(T, main_tokens[node]);
+}
+
+fn fields(
+    self: @This(),
+    comptime T: type,
+    buf: *[2]NodeIndex,
+    node: NodeIndex,
+) error{Type}![]const NodeIndex {
+    const main_tokens = self.ast.nodes.items(.main_token);
+
+    // Attempt to parse as a struct
+    if (self.ast.fullStructInit(buf, node)) |init| {
+        if (init.ast.type_expr != 0) {
+            return self.failTypeExpr(main_tokens[init.ast.type_expr]);
+        }
+        return init.ast.fields;
+    }
+
+    // Attempt to parse as a zero length array
+    if (self.ast.fullArrayInit(buf, node)) |init| {
+        if (init.ast.type_expr != 0) {
+            return self.failTypeExpr(main_tokens[init.ast.type_expr]);
+        }
+        if (init.ast.elements.len != 0) {
+            return self.failExpectedType(T, main_tokens[node]);
+        }
+        return init.ast.elements;
+    }
+
+    // Fail otherwise
+    return self.failExpectedType(T, main_tokens[node]);
 }
 
 fn parseStruct(self: *@This(), comptime T: type, comptime options: ParseOptions, node: NodeIndex) error{ OutOfMemory, Type }!T {
@@ -812,7 +853,7 @@ fn parseStruct(self: *@This(), comptime T: type, comptime options: ParseOptions,
 
     // Parse the struct
     var buf: [2]NodeIndex = undefined;
-    const field_nodes = try self.elementsOrFields(T, &buf, node);
+    const field_nodes = try self.fields(T, &buf, node);
 
     var result: T = undefined;
     var field_found: [field_infos.len]bool = .{false} ** field_infos.len;
@@ -871,7 +912,8 @@ fn parseStruct(self: *@This(), comptime T: type, comptime options: ParseOptions,
                 const typed: *const field_info.type = @ptrCast(@alignCast(default));
                 @field(result, field_info.name) = typed.*;
             } else {
-                return self.failMissingField(T, field_infos[i].name, node);
+                const main_tokens = self.ast.nodes.items(.main_token);
+                return self.failMissingField(T, field_infos[i].name, main_tokens[node]);
             }
         }
     }
@@ -916,11 +958,11 @@ test "std.zon structs" {
         const Vec2 = struct { x: f32, y: f32 };
         var ast = try std.zig.Ast.parse(gpa, ".{.x=1.5, .z=2.5}", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Vec2, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Vec2), status.unknown_field.type_name);
-        try std.testing.expectEqualStrings("z", ast.tokenSlice(status.unknown_field.token));
-        const token = status.unknown_field.token;
+        try std.testing.expectEqualStrings(@typeName(Vec2), status.failure.reason.unknown_field.type_name);
+        try std.testing.expectEqualStrings("z", ast.tokenSlice(status.failure.token));
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -935,11 +977,11 @@ test "std.zon structs" {
         const Vec2 = struct { x: f32, y: f32 };
         var ast = try std.zig.Ast.parse(gpa, ".{.x=1.5, .@\"abc\"=2.5}", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Vec2, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Vec2), status.unknown_field.type_name);
-        try std.testing.expectEqualStrings("@\"abc\"", ast.tokenSlice(status.unknown_field.token));
-        const token = status.unknown_field.token;
+        try std.testing.expectEqualStrings(@typeName(Vec2), status.failure.reason.unknown_field.type_name);
+        try std.testing.expectEqualStrings("@\"abc\"", ast.tokenSlice(status.failure.token));
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -954,9 +996,9 @@ test "std.zon structs" {
         const Vec2 = struct { x: f32, y: f32 };
         var ast = try std.zig.Ast.parse(gpa, ".{.x=1.5, .x=2.5}", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Vec2, gpa, &ast, &status, .{}));
-        const token = status.duplicate_field.token;
+        const token = status.failure.token;
         try std.testing.expectEqualStrings("x", ast.tokenSlice(token));
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
@@ -979,11 +1021,11 @@ test "std.zon structs" {
         const Vec2 = struct {};
         var ast = try std.zig.Ast.parse(gpa, ".{.x=1.5, .z=2.5}", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Vec2, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Vec2), status.unknown_field.type_name);
-        try std.testing.expectEqualStrings("x", ast.tokenSlice(status.unknown_field.token));
-        const token = status.unknown_field.token;
+        try std.testing.expectEqualStrings(@typeName(Vec2), status.failure.reason.unknown_field.type_name);
+        try std.testing.expectEqualStrings("x", ast.tokenSlice(status.failure.token));
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -998,13 +1040,11 @@ test "std.zon structs" {
         const Vec2 = struct { x: f32, y: f32 };
         var ast = try std.zig.Ast.parse(gpa, ".{.x=1.5}", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Vec2, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Vec2), status.missing_field.type_name);
-        try std.testing.expectEqualStrings("y", status.missing_field.field_name);
-        const node = status.missing_field.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(@typeName(Vec2), status.failure.reason.missing_field.type_name);
+        try std.testing.expectEqualStrings("y", status.failure.reason.missing_field.field_name);
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -1045,11 +1085,9 @@ test "std.zon structs" {
             var ast = try std.zig.Ast.parse(gpa, "Empty{}", .zon);
             defer ast.deinit(gpa);
 
-            var status: ParseStatus = .success;
+            var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst(Empty, gpa, &ast, &status, .{}));
-            const node = status.type_expr.node;
-            const main_tokens = ast.nodes.items(.main_token);
-            const token = main_tokens[node];
+            const token = status.failure.token;
             const location = ast.tokenLocation(0, token);
             try std.testing.expectEqual(Ast.Location{
                 .line = 0,
@@ -1064,11 +1102,9 @@ test "std.zon structs" {
             var ast = try std.zig.Ast.parse(gpa, "[3]u8{1, 2, 3}", .zon);
             defer ast.deinit(gpa);
 
-            var status: ParseStatus = .success;
+            var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([3]u8, gpa, &ast, &status, .{}));
-            const node = status.type_expr.node;
-            const main_tokens = ast.nodes.items(.main_token);
-            const token = main_tokens[node];
+            const token = status.failure.token;
             const location = ast.tokenLocation(0, token);
             try std.testing.expectEqual(Ast.Location{
                 .line = 0,
@@ -1083,11 +1119,9 @@ test "std.zon structs" {
             var ast = try std.zig.Ast.parse(gpa, "[]u8{1, 2, 3}", .zon);
             defer ast.deinit(gpa);
 
-            var status: ParseStatus = .success;
+            var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([]u8, gpa, &ast, &status, .{}));
-            const node = status.type_expr.node;
-            const main_tokens = ast.nodes.items(.main_token);
-            const token = main_tokens[node];
+            const token = status.failure.token;
             const location = ast.tokenLocation(0, token);
             try std.testing.expectEqual(Ast.Location{
                 .line = 0,
@@ -1103,11 +1137,9 @@ test "std.zon structs" {
             var ast = try std.zig.Ast.parse(gpa, "Tuple{1, 2, 3}", .zon);
             defer ast.deinit(gpa);
 
-            var status: ParseStatus = .success;
+            var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst(Tuple, gpa, &ast, &status, .{}));
-            const node = status.type_expr.node;
-            const main_tokens = ast.nodes.items(.main_token);
-            const token = main_tokens[node];
+            const token = status.failure.token;
             const location = ast.tokenLocation(0, token);
             try std.testing.expectEqual(Ast.Location{
                 .line = 0,
@@ -1127,10 +1159,11 @@ fn parseTuple(self: *@This(), comptime T: type, comptime options: ParseOptions, 
 
     // Parse the struct
     var buf: [2]NodeIndex = undefined;
-    const field_nodes = try self.elementsOrFields(T, &buf, node);
+    const field_nodes = try self.elements(T, &buf, node);
 
     if (field_nodes.len != field_infos.len) {
-        return self.failExpectedType(T, node);
+        const main_tokens = self.ast.nodes.items(.main_token);
+        return self.failExpectedType(T, main_tokens[node]);
     }
 
     inline for (field_infos, field_nodes, 0..) |field_info, field_node, initialized| {
@@ -1184,12 +1217,10 @@ test "std.zon tuples" {
         const Tuple = struct { f32, bool };
         var ast = try std.zig.Ast.parse(gpa, ".{0.5, true, 123}", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Tuple, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Tuple), status.expected_type.type_name);
-        const node = status.expected_type.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(@typeName(Tuple), status.failure.reason.expected_type.type_name);
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -1204,18 +1235,52 @@ test "std.zon tuples" {
         const Tuple = struct { f32, bool };
         var ast = try std.zig.Ast.parse(gpa, ".{0.5}", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Tuple, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Tuple), status.expected_type.type_name);
-        const node = status.expected_type.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(@typeName(Tuple), status.failure.reason.expected_type.type_name);
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
             .column = 1,
             .line_start = 0,
             .line_end = 6,
+        }, location);
+    }
+
+    // Tuple with unexpected field names
+    {
+        const Tuple = struct { f32 };
+        var ast = try std.zig.Ast.parse(gpa, ".{.foo = 10.0}", .zon);
+        defer ast.deinit(gpa);
+        var status: ParseStatus = undefined;
+        try std.testing.expectError(error.Type, parseFromAst(Tuple, gpa, &ast, &status, .{}));
+        try std.testing.expectEqualStrings(@typeName(Tuple), status.failure.reason.expected_type.type_name);
+        const token = status.failure.token;
+        const location = ast.tokenLocation(0, token);
+        try std.testing.expectEqual(Ast.Location{
+            .line = 0,
+            .column = 1,
+            .line_start = 0,
+            .line_end = 14,
+        }, location);
+    }
+
+    // Struct with missing field names
+    {
+        const Struct = struct { foo: f32 };
+        var ast = try std.zig.Ast.parse(gpa, ".{10.0}", .zon);
+        defer ast.deinit(gpa);
+        var status: ParseStatus = undefined;
+        try std.testing.expectError(error.Type, parseFromAst(Struct, gpa, &ast, &status, .{}));
+        try std.testing.expectEqualStrings(@typeName(Struct), status.failure.reason.expected_type.type_name);
+        const token = status.failure.token;
+        const location = ast.tokenLocation(0, token);
+        try std.testing.expectEqual(Ast.Location{
+            .line = 0,
+            .column = 1,
+            .line_start = 0,
+            .line_end = 7,
         }, location);
     }
 }
@@ -1225,11 +1290,12 @@ fn parseArray(self: *@This(), comptime T: type, comptime options: ParseOptions, 
     // Parse the array
     var array: T = undefined;
     var buf: [2]NodeIndex = undefined;
-    const element_nodes = try self.elementsOrFields(T, &buf, node);
+    const element_nodes = try self.elements(T, &buf, node);
 
     // Check if the size matches
     if (element_nodes.len != Array.len) {
-        return self.failExpectedType(T, node);
+        const main_tokens = self.ast.nodes.items(.main_token);
+        return self.failExpectedType(T, main_tokens[node]);
     }
 
     // Parse the elements and return the array
@@ -1346,12 +1412,10 @@ test "std.zon arrays and slices" {
     {
         var ast = try std.zig.Ast.parse(gpa, ".{'a', 'b', 'c'}", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst([0]u8, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName([0]u8), status.expected_type.type_name);
-        const node = status.expected_type.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(@typeName([0]u8), status.failure.reason.expected_type.type_name);
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -1365,12 +1429,10 @@ test "std.zon arrays and slices" {
     {
         var ast = try std.zig.Ast.parse(gpa, ".{'a', 'b'}", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst([1]u8, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName([1]u8), status.expected_type.type_name);
-        const node = status.expected_type.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(@typeName([1]u8), status.failure.reason.expected_type.type_name);
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -1384,12 +1446,10 @@ test "std.zon arrays and slices" {
     {
         var ast = try std.zig.Ast.parse(gpa, ".{'a'}", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst([2]u8, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName([2]u8), status.expected_type.type_name);
-        const node = status.expected_type.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(@typeName([2]u8), status.failure.reason.expected_type.type_name);
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -1403,12 +1463,10 @@ test "std.zon arrays and slices" {
     {
         var ast = try std.zig.Ast.parse(gpa, ".{}", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst([3]u8, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName([3]u8), status.expected_type.type_name);
-        const node = status.expected_type.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(@typeName([3]u8), status.failure.reason.expected_type.type_name);
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -1424,12 +1482,10 @@ test "std.zon arrays and slices" {
         {
             var ast = try std.zig.Ast.parse(gpa, ".{'a', 'b', 'c'}", .zon);
             defer ast.deinit(gpa);
-            var status: ParseStatus = .success;
+            var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([3]bool, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName(bool), status.expected_type.type_name);
-            const node = status.expected_type.node;
-            const main_tokens = ast.nodes.items(.main_token);
-            const token = main_tokens[node];
+            try std.testing.expectEqualStrings(@typeName(bool), status.failure.reason.expected_type.type_name);
+            const token = status.failure.token;
             const location = ast.tokenLocation(0, token);
             try std.testing.expectEqual(Ast.Location{
                 .line = 0,
@@ -1443,12 +1499,10 @@ test "std.zon arrays and slices" {
         {
             var ast = try std.zig.Ast.parse(gpa, ".{'a', 'b', 'c'}", .zon);
             defer ast.deinit(gpa);
-            var status: ParseStatus = .success;
+            var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([]bool, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName(bool), status.expected_type.type_name);
-            const node = status.expected_type.node;
-            const main_tokens = ast.nodes.items(.main_token);
-            const token = main_tokens[node];
+            try std.testing.expectEqualStrings(@typeName(bool), status.failure.reason.expected_type.type_name);
+            const token = status.failure.token;
             const location = ast.tokenLocation(0, token);
             try std.testing.expectEqual(Ast.Location{
                 .line = 0,
@@ -1465,12 +1519,10 @@ test "std.zon arrays and slices" {
         {
             var ast = try std.zig.Ast.parse(gpa, "'a'", .zon);
             defer ast.deinit(gpa);
-            var status: ParseStatus = .success;
+            var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([3]u8, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName([3]u8), status.expected_type.type_name);
-            const node = status.expected_type.node;
-            const main_tokens = ast.nodes.items(.main_token);
-            const token = main_tokens[node];
+            try std.testing.expectEqualStrings(@typeName([3]u8), status.failure.reason.expected_type.type_name);
+            const token = status.failure.token;
             const location = ast.tokenLocation(0, token);
             try std.testing.expectEqual(Ast.Location{
                 .line = 0,
@@ -1484,12 +1536,10 @@ test "std.zon arrays and slices" {
         {
             var ast = try std.zig.Ast.parse(gpa, "'a'", .zon);
             defer ast.deinit(gpa);
-            var status: ParseStatus = .success;
+            var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([]u8, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName([]u8), status.expected_type.type_name);
-            const node = status.expected_type.node;
-            const main_tokens = ast.nodes.items(.main_token);
-            const token = main_tokens[node];
+            try std.testing.expectEqualStrings(@typeName([]u8), status.failure.reason.expected_type.type_name);
+            const token = status.failure.token;
             const location = ast.tokenLocation(0, token);
             try std.testing.expectEqual(Ast.Location{
                 .line = 0,
@@ -1504,11 +1554,9 @@ test "std.zon arrays and slices" {
     {
         var ast = try std.zig.Ast.parse(gpa, "&.{'a', 'b', 'c'}", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst([3]bool, gpa, &ast, &status, .{}));
-        const node = status.address_of.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -1538,7 +1586,7 @@ fn parseSlice(self: *@This(), comptime T: type, comptime options: ParseOptions, 
 
     // Parse the array literal
     var buf: [2]NodeIndex = undefined;
-    const element_nodes = try self.elementsOrFields(T, &buf, node);
+    const element_nodes = try self.elements(T, &buf, node);
 
     // Allocate the slice
     const sentinel = if (Ptr.sentinel) |s| @as(*const Ptr.child, @ptrCast(s)).* else null;
@@ -1574,7 +1622,7 @@ fn parseStringLiteral(self: *@This(), comptime T: type, node: NodeIndex) !T {
     const raw = self.ast.tokenSlice(token);
 
     if (Pointer.child != u8 or !Pointer.is_const or Pointer.alignment != 1) {
-        return self.failExpectedType(T, node);
+        return self.failExpectedType(T, token);
     }
     var buf = std.ArrayListUnmanaged(u8){};
     defer buf.deinit(self.gpa);
@@ -1585,7 +1633,7 @@ fn parseStringLiteral(self: *@This(), comptime T: type, node: NodeIndex) !T {
 
     if (Pointer.sentinel) |sentinel| {
         if (@as(*const u8, @ptrCast(sentinel)).* != 0) {
-            return self.failExpectedType(T, node);
+            return self.failExpectedType(T, token);
         }
         return buf.toOwnedSliceSentinel(self.gpa, 0);
     }
@@ -1594,6 +1642,8 @@ fn parseStringLiteral(self: *@This(), comptime T: type, node: NodeIndex) !T {
 }
 
 fn parseMultilineStringLiteral(self: *@This(), comptime T: type, node: NodeIndex) !T {
+    const main_tokens = self.ast.nodes.items(.main_token);
+
     const Pointer = @typeInfo(T).Pointer;
 
     if (Pointer.size != .Slice) {
@@ -1601,7 +1651,7 @@ fn parseMultilineStringLiteral(self: *@This(), comptime T: type, node: NodeIndex
     }
 
     if (Pointer.child != u8 or !Pointer.is_const or Pointer.alignment != 1) {
-        return self.failExpectedType(T, node);
+        return self.failExpectedType(T, main_tokens[node]);
     }
 
     var buf = std.ArrayListUnmanaged(u8){};
@@ -1617,7 +1667,7 @@ fn parseMultilineStringLiteral(self: *@This(), comptime T: type, node: NodeIndex
 
     if (Pointer.sentinel) |sentinel| {
         if (@as(*const u8, @ptrCast(sentinel)).* != 0) {
-            return self.failExpectedType(T, node);
+            return self.failExpectedType(T, main_tokens[node]);
         }
         return buf.toOwnedSliceSentinel(self.gpa, 0);
     } else {
@@ -1654,12 +1704,10 @@ test "std.zon string literal" {
         {
             var ast = try std.zig.Ast.parse(gpa, "\"abcd\"", .zon);
             defer ast.deinit(gpa);
-            var status: ParseStatus = .success;
+            var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([]u8, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName([]u8), status.expected_type.type_name);
-            const node = status.expected_type.node;
-            const main_tokens = ast.nodes.items(.main_token);
-            const token = main_tokens[node];
+            try std.testing.expectEqualStrings(@typeName([]u8), status.failure.reason.expected_type.type_name);
+            const token = status.failure.token;
             const location = ast.tokenLocation(0, token);
             try std.testing.expectEqual(Ast.Location{
                 .line = 0,
@@ -1672,12 +1720,10 @@ test "std.zon string literal" {
         {
             var ast = try std.zig.Ast.parse(gpa, "\\\\abcd", .zon);
             defer ast.deinit(gpa);
-            var status: ParseStatus = .success;
+            var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([]u8, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName([]u8), status.expected_type.type_name);
-            const node = status.expected_type.node;
-            const main_tokens = ast.nodes.items(.main_token);
-            const token = main_tokens[node];
+            try std.testing.expectEqualStrings(@typeName([]u8), status.failure.reason.expected_type.type_name);
+            const token = status.failure.token;
             const location = ast.tokenLocation(0, token);
             try std.testing.expectEqual(Ast.Location{
                 .line = 0,
@@ -1693,12 +1739,10 @@ test "std.zon string literal" {
         {
             var ast = try std.zig.Ast.parse(gpa, "\"abcd\"", .zon);
             defer ast.deinit(gpa);
-            var status: ParseStatus = .success;
+            var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([4:0]u8, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName([4:0]u8), status.expected_type.type_name);
-            const node = status.expected_type.node;
-            const main_tokens = ast.nodes.items(.main_token);
-            const token = main_tokens[node];
+            try std.testing.expectEqualStrings(@typeName([4:0]u8), status.failure.reason.expected_type.type_name);
+            const token = status.failure.token;
             const location = ast.tokenLocation(0, token);
             try std.testing.expectEqual(Ast.Location{
                 .line = 0,
@@ -1711,12 +1755,10 @@ test "std.zon string literal" {
         {
             var ast = try std.zig.Ast.parse(gpa, "\\\\abcd", .zon);
             defer ast.deinit(gpa);
-            var status: ParseStatus = .success;
+            var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([4:0]u8, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName([4:0]u8), status.expected_type.type_name);
-            const node = status.expected_type.node;
-            const main_tokens = ast.nodes.items(.main_token);
-            const token = main_tokens[node];
+            try std.testing.expectEqualStrings(@typeName([4:0]u8), status.failure.reason.expected_type.type_name);
+            const token = status.failure.token;
             const location = ast.tokenLocation(0, token);
             try std.testing.expectEqual(Ast.Location{
                 .line = 0,
@@ -1749,12 +1791,10 @@ test "std.zon string literal" {
         {
             var ast = try std.zig.Ast.parse(gpa, "\"foo\"", .zon);
             defer ast.deinit(gpa);
-            var status: ParseStatus = .success;
+            var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([:1]const u8, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName([:1]const u8), status.expected_type.type_name);
-            const node = status.expected_type.node;
-            const main_tokens = ast.nodes.items(.main_token);
-            const token = main_tokens[node];
+            try std.testing.expectEqualStrings(@typeName([:1]const u8), status.failure.reason.expected_type.type_name);
+            const token = status.failure.token;
             const location = ast.tokenLocation(0, token);
             try std.testing.expectEqual(Ast.Location{
                 .line = 0,
@@ -1767,12 +1807,10 @@ test "std.zon string literal" {
         {
             var ast = try std.zig.Ast.parse(gpa, "\\\\foo", .zon);
             defer ast.deinit(gpa);
-            var status: ParseStatus = .success;
+            var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([:1]const u8, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName([:1]const u8), status.expected_type.type_name);
-            const node = status.expected_type.node;
-            const main_tokens = ast.nodes.items(.main_token);
-            const token = main_tokens[node];
+            try std.testing.expectEqualStrings(@typeName([:1]const u8), status.failure.reason.expected_type.type_name);
+            const token = status.failure.token;
             const location = ast.tokenLocation(0, token);
             try std.testing.expectEqual(Ast.Location{
                 .line = 0,
@@ -1787,9 +1825,9 @@ test "std.zon string literal" {
     {
         var ast = try std.zig.Ast.parse(gpa, "\"\\a\"", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst([]const u8, gpa, &ast, &status, .{}));
-        const token = status.invalid_string_literal.token;
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -1804,12 +1842,10 @@ test "std.zon string literal" {
         {
             var ast = try std.zig.Ast.parse(gpa, "\"a\"", .zon);
             defer ast.deinit(gpa);
-            var status: ParseStatus = .success;
+            var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([]const i8, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName([]const i8), status.expected_type.type_name);
-            const node = status.expected_type.node;
-            const main_tokens = ast.nodes.items(.main_token);
-            const token = main_tokens[node];
+            try std.testing.expectEqualStrings(@typeName([]const i8), status.failure.reason.expected_type.type_name);
+            const token = status.failure.token;
             const location = ast.tokenLocation(0, token);
             try std.testing.expectEqual(Ast.Location{
                 .line = 0,
@@ -1822,12 +1858,10 @@ test "std.zon string literal" {
         {
             var ast = try std.zig.Ast.parse(gpa, "\\\\a", .zon);
             defer ast.deinit(gpa);
-            var status: ParseStatus = .success;
+            var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([]const i8, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName([]const i8), status.expected_type.type_name);
-            const node = status.expected_type.node;
-            const main_tokens = ast.nodes.items(.main_token);
-            const token = main_tokens[node];
+            try std.testing.expectEqualStrings(@typeName([]const i8), status.failure.reason.expected_type.type_name);
+            const token = status.failure.token;
             const location = ast.tokenLocation(0, token);
             try std.testing.expectEqual(Ast.Location{
                 .line = 0,
@@ -1843,12 +1877,10 @@ test "std.zon string literal" {
         {
             var ast = try std.zig.Ast.parse(gpa, "\"abc\"", .zon);
             defer ast.deinit(gpa);
-            var status: ParseStatus = .success;
+            var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([]align(2) const u8, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName([]align(2) const u8), status.expected_type.type_name);
-            const node = status.expected_type.node;
-            const main_tokens = ast.nodes.items(.main_token);
-            const token = main_tokens[node];
+            try std.testing.expectEqualStrings(@typeName([]align(2) const u8), status.failure.reason.expected_type.type_name);
+            const token = status.failure.token;
             const location = ast.tokenLocation(0, token);
             try std.testing.expectEqual(Ast.Location{
                 .line = 0,
@@ -1861,12 +1893,10 @@ test "std.zon string literal" {
         {
             var ast = try std.zig.Ast.parse(gpa, "\\\\abc", .zon);
             defer ast.deinit(gpa);
-            var status: ParseStatus = .success;
+            var status: ParseStatus = undefined;
             try std.testing.expectError(error.Type, parseFromAst([]align(2) const u8, gpa, &ast, &status, .{}));
-            try std.testing.expectEqualStrings(@typeName([]align(2) const u8), status.expected_type.type_name);
-            const node = status.expected_type.node;
-            const main_tokens = ast.nodes.items(.main_token);
-            const token = main_tokens[node];
+            try std.testing.expectEqualStrings(@typeName([]align(2) const u8), status.failure.reason.expected_type.type_name);
+            const token = status.failure.token;
             const location = ast.tokenLocation(0, token);
             try std.testing.expectEqual(Ast.Location{
                 .line = 0,
@@ -1914,6 +1944,9 @@ test "std.zon string literal" {
 
 fn parseEnumLiteral(self: @This(), comptime T: type, node: NodeIndex) error{Type}!T {
     const tags = self.ast.nodes.items(.tag);
+    const main_tokens = self.ast.nodes.items(.main_token);
+    const token = main_tokens[node];
+
     switch (tags[node]) {
         .enum_literal => {
             // Create a comptime string map for the enum fields
@@ -1925,18 +1958,14 @@ fn parseEnumLiteral(self: @This(), comptime T: type, node: NodeIndex) error{Type
             const enum_tags = std.StaticStringMap(T).initComptime(kvs_list);
 
             // Get the tag if it exists
-            const main_tokens = self.ast.nodes.items(.main_token);
-            const token = main_tokens[node];
-            {
-                const bytes = self.parseIdent(token) catch |err| switch (err) {
-                    error.IdentTooLong => return self.failCannotRepresent(T, token),
-                    else => |e| return e,
-                };
-                return enum_tags.get(bytes) orelse
-                    self.failCannotRepresent(T, token);
-            }
+            const bytes = self.parseIdent(token) catch |err| switch (err) {
+                error.IdentTooLong => return self.failCannotRepresent(T, token),
+                else => |e| return e,
+            };
+            return enum_tags.get(bytes) orelse
+                self.failCannotRepresent(T, token);
         },
-        else => return self.failExpectedType(T, node),
+        else => return self.failExpectedType(T, token),
     }
 }
 
@@ -1961,7 +1990,10 @@ fn parseIdent(self: @This(), token: TokenIndex) error{ Type, IdentTooLong }![]co
             .success => {},
         }
         if (std.mem.indexOfScalar(u8, parsed.items, 0) != null) {
-            return self.fail(.{ .ident_embedded_null = .{ .token = token } });
+            return self.fail(.{
+                .token = token,
+                .reason = .ident_embedded_null,
+            });
         }
         return parsed.items;
     }
@@ -1989,12 +2021,10 @@ test "std.zon enum literals" {
     {
         var ast = try std.zig.Ast.parse(gpa, ".qux", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Enum, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(status.cannot_represent.type_name, @typeName(Enum));
-        const node = status.cannot_represent.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(status.failure.reason.cannot_represent.type_name, @typeName(Enum));
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -2008,12 +2038,10 @@ test "std.zon enum literals" {
     {
         var ast = try std.zig.Ast.parse(gpa, ".@\"foobarbaz\"", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Enum, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(status.cannot_represent.type_name, @typeName(Enum));
-        const node = status.cannot_represent.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(status.failure.reason.cannot_represent.type_name, @typeName(Enum));
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -2027,12 +2055,10 @@ test "std.zon enum literals" {
     {
         var ast = try std.zig.Ast.parse(gpa, "true", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(Enum, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(Enum), status.expected_type.type_name);
-        const node = status.expected_type.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(@typeName(Enum), status.failure.reason.expected_type.type_name);
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -2046,9 +2072,9 @@ test "std.zon enum literals" {
     {
         var ast = try std.zig.Ast.parse(gpa, ".@\"\\x00\"", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(enum { a }, gpa, &ast, &status, .{}));
-        const token = status.ident_embedded_null.token;
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -2059,84 +2085,97 @@ test "std.zon enum literals" {
     }
 }
 
-fn fail(self: @This(), status: ParseStatus) error{Type} {
+fn fail(self: @This(), failure: ParseFailure) error{Type} {
     @setCold(true);
-    assert(status != .success);
-    if (self.status) |s| {
-        assert(s.* == .success);
-        s.* = status;
-    }
+    if (self.status) |s| s.* = .{ .failure = failure };
     return error.Type;
 }
 
-fn failInvalidStringLiteral(self: @This(), token: TokenIndex, reason: StringLiteralError) error{Type} {
+fn failInvalidStringLiteral(self: @This(), token: TokenIndex, err: StringLiteralError) error{Type} {
     @setCold(true);
-    return self.fail(.{ .invalid_string_literal = .{
+    return self.fail(.{
         .token = token,
-        .reason = reason,
-    } });
+        .reason = .{
+            .invalid_string_literal = .{
+                .err = err,
+            },
+        },
+    });
 }
 
-fn failInvalidNumberLiteral(self: @This(), node: NodeIndex, reason: NumberLiteralError) error{Type} {
+fn failInvalidNumberLiteral(self: @This(), token: TokenIndex, err: NumberLiteralError) error{Type} {
     @setCold(true);
-    return self.fail(.{ .invalid_number_literal = .{
-        .node = node,
-        .reason = reason,
-    } });
+    return self.fail(.{
+        .token = token,
+        .reason = .{ .invalid_number_literal = .{
+            .err = err,
+        } },
+    });
 }
 
-fn failExpectedType(self: @This(), comptime T: type, node: NodeIndex) error{Type} {
+fn failExpectedType(self: @This(), comptime T: type, token: TokenIndex) error{Type} {
     @setCold(true);
-    return self.fail(.{ .expected_type = .{
-        .type_name = @typeName(T),
-        .node = node,
-    } });
+    return self.fail(.{
+        .token = token,
+        .reason = .{ .expected_type = .{
+            .type_name = @typeName(T),
+        } },
+    });
 }
 
-fn failCannotRepresent(self: @This(), comptime T: type, node: NodeIndex) error{Type} {
+fn failCannotRepresent(self: @This(), comptime T: type, token: TokenIndex) error{Type} {
     @setCold(true);
-    return self.fail(.{ .cannot_represent = .{
-        .type_name = @typeName(T),
-        .node = node,
-    } });
+    return self.fail(.{
+        .token = token,
+        .reason = .{ .cannot_represent = .{
+            .type_name = @typeName(T),
+        } },
+    });
 }
 
-fn failNegativeIntegerZero(self: @This(), node: NodeIndex) error{Type} {
+fn failNegativeIntegerZero(self: @This(), token: TokenIndex) error{Type} {
     @setCold(true);
-    return self.fail(.{ .negative_integer_zero = .{
-        .node = node,
-    } });
+    return self.fail(.{
+        .token = token,
+        .reason = .negative_integer_zero,
+    });
 }
 
 fn failUnknownField(self: @This(), comptime T: type, token: TokenIndex) error{Type} {
     @setCold(true);
-    return self.fail(.{ .unknown_field = .{
+    return self.fail(.{
         .token = token,
-        .type_name = @typeName(T),
-    } });
+        .reason = .{ .unknown_field = .{
+            .type_name = @typeName(T),
+        } },
+    });
 }
 
-fn failMissingField(self: @This(), comptime T: type, name: []const u8, node: NodeIndex) error{Type} {
+fn failMissingField(self: @This(), comptime T: type, name: []const u8, token: TokenIndex) error{Type} {
     @setCold(true);
-    return self.fail(.{ .missing_field = .{
-        .node = node,
-        .type_name = @typeName(T),
-        .field_name = name,
-    } });
+    return self.fail(.{
+        .token = token,
+        .reason = .{ .missing_field = .{
+            .type_name = @typeName(T),
+            .field_name = name,
+        } },
+    });
 }
 
 fn failDuplicateField(self: @This(), token: TokenIndex) error{Type} {
     @setCold(true);
-    return self.fail(.{ .duplicate_field = .{
+    return self.fail(.{
         .token = token,
-    } });
+        .reason = .duplicate_field,
+    });
 }
 
-fn failTypeExpr(self: @This(), node: NodeIndex) error{Type} {
+fn failTypeExpr(self: @This(), token: TokenIndex) error{Type} {
     @setCold(true);
-    return self.fail(.{ .type_expr = .{
-        .node = node,
-    } });
+    return self.fail(.{
+        .token = token,
+        .reason = .type_expr,
+    });
 }
 
 fn parseBool(self: @This(), node: NodeIndex) error{Type}!bool {
@@ -2156,7 +2195,7 @@ fn parseBool(self: @This(), node: NodeIndex) error{Type}!bool {
         },
         else => {},
     }
-    return self.failExpectedType(bool, node);
+    return self.failExpectedType(bool, token);
 }
 
 test "std.zon parse bool" {
@@ -2170,12 +2209,10 @@ test "std.zon parse bool" {
     {
         var ast = try std.zig.Ast.parse(gpa, " foo", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(bool, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(bool), status.expected_type.type_name);
-        const node = status.expected_type.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(@typeName(bool), status.failure.reason.expected_type.type_name);
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -2187,12 +2224,10 @@ test "std.zon parse bool" {
     {
         var ast = try std.zig.Ast.parse(gpa, "123", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(bool, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(bool), status.expected_type.type_name);
-        const node = status.expected_type.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(@typeName(bool), status.failure.reason.expected_type.type_name);
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -2208,6 +2243,7 @@ fn parseNumber(
     comptime T: type,
     node: NodeIndex,
 ) error{Type}!T {
+    const main_tokens = self.ast.nodes.items(.main_token);
     const num_lit_node = self.numLitNode(node);
     const tags = self.ast.nodes.items(.tag);
     switch (tags[num_lit_node]) {
@@ -2215,7 +2251,6 @@ fn parseNumber(
         .char_literal => return self.parseCharLiteral(T, node),
         .identifier => switch (@typeInfo(T)) {
             .Float => {
-                const main_tokens = self.ast.nodes.items(.main_token);
                 const token = main_tokens[num_lit_node];
                 const bytes = self.ast.tokenSlice(token);
                 const Ident = enum { inf, nan };
@@ -2238,7 +2273,7 @@ fn parseNumber(
         },
         else => {},
     }
-    return self.failExpectedType(T, num_lit_node);
+    return self.failExpectedType(T, main_tokens[num_lit_node]);
 }
 
 fn parseNumberLiteral(self: @This(), comptime T: type, node: NodeIndex) error{Type}!T {
@@ -2252,14 +2287,15 @@ fn parseNumberLiteral(self: @This(), comptime T: type, node: NodeIndex) error{Ty
         .int => |int| return self.applySignToInt(T, node, int),
         .big_int => |base| return self.parseBigNumber(T, node, base),
         .float => return self.parseFloat(T, node),
-        .failure => |reason| return self.failInvalidNumberLiteral(node, reason),
+        .failure => |reason| return self.failInvalidNumberLiteral(main_tokens[node], reason),
     }
 }
 
 fn applySignToInt(self: @This(), comptime T: type, node: NodeIndex, int: anytype) error{Type}!T {
+    const main_tokens = self.ast.nodes.items(.main_token);
     if (self.isNegative(node)) {
         if (int == 0) {
-            return self.failNegativeIntegerZero(node);
+            return self.failNegativeIntegerZero(main_tokens[node]);
         }
         switch (@typeInfo(T)) {
             .Int => |int_type| switch (int_type.signedness) {
@@ -2269,9 +2305,9 @@ fn applySignToInt(self: @This(), comptime T: type, node: NodeIndex, int: anytype
                         return std.math.minInt(T);
                     }
 
-                    return -(std.math.cast(T, int) orelse return self.failCannotRepresent(T, node));
+                    return -(std.math.cast(T, int) orelse return self.failCannotRepresent(T, main_tokens[node]));
                 },
-                .unsigned => return self.failCannotRepresent(T, node),
+                .unsigned => return self.failCannotRepresent(T, main_tokens[node]),
             },
             .Float => return -@as(T, @floatFromInt(int)),
             else => @compileError("internal error: expected numeric type"),
@@ -2279,7 +2315,7 @@ fn applySignToInt(self: @This(), comptime T: type, node: NodeIndex, int: anytype
     } else {
         switch (@typeInfo(T)) {
             .Int => return std.math.cast(T, int) orelse
-                self.failCannotRepresent(T, node),
+                self.failCannotRepresent(T, main_tokens[node]),
             .Float => return @as(T, @floatFromInt(int)),
             else => @compileError("internal error: expected numeric type"),
         }
@@ -2297,7 +2333,8 @@ fn parseBigNumber(
         .Float => {
             const result = @as(T, @floatCast(try self.parseFloat(f128, node)));
             if (std.math.isNegativeZero(result)) {
-                return self.failNegativeIntegerZero(node);
+                const main_tokens = self.ast.nodes.items(.main_token);
+                return self.failNegativeIntegerZero(main_tokens[node]);
             }
             return result;
         },
@@ -2317,7 +2354,7 @@ fn parseBigInt(self: @This(), comptime T: type, node: NodeIndex, base: Base) err
         std.fmt.parseIntWithSign(T, u8, bytes, @intFromEnum(base), .pos);
     return result catch |err| switch (err) {
         error.InvalidCharacter => unreachable,
-        error.Overflow => return self.failCannotRepresent(T, node),
+        error.Overflow => return self.failCannotRepresent(T, main_tokens[node]),
     };
 }
 
@@ -2336,7 +2373,7 @@ fn parseFloat(
     switch (@typeInfo(T)) {
         .Float => return @as(T, @floatCast(result)),
         .Int => return intFromFloatExact(T, result) orelse
-            return self.failCannotRepresent(T, node),
+            return self.failCannotRepresent(T, main_tokens[node]),
         else => @compileError("internal error: expected integer or float type"),
     }
 }
@@ -2447,12 +2484,10 @@ test "std.zon parse int" {
     {
         var ast = try std.zig.Ast.parse(gpa, "36893488147419103232", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(i66, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(status.cannot_represent.type_name, @typeName(i66));
-        const node = status.cannot_represent.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(status.failure.reason.cannot_represent.type_name, @typeName(i66));
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -2464,12 +2499,10 @@ test "std.zon parse int" {
     {
         var ast = try std.zig.Ast.parse(gpa, "-36893488147419103233", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(i66, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(status.cannot_represent.type_name, @typeName(i66));
-        const node = status.cannot_represent.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(status.failure.reason.cannot_represent.type_name, @typeName(i66));
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -2551,17 +2584,15 @@ test "std.zon parse int" {
     {
         var ast = try std.zig.Ast.parse(gpa, "32a32", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(u8, gpa, &ast, &status, .{}));
-        try std.testing.expectEqual(status.invalid_number_literal.reason, NumberLiteralError{
+        try std.testing.expectEqual(status.failure.reason.invalid_number_literal.err, NumberLiteralError{
             .invalid_digit = .{
                 .i = 2,
                 .base = @as(Base, @enumFromInt(10)),
             },
         });
-        const node = status.invalid_number_literal.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -2575,12 +2606,10 @@ test "std.zon parse int" {
     {
         var ast = try std.zig.Ast.parse(gpa, "true", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(u8, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(u8), status.expected_type.type_name);
-        const node = status.expected_type.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(@typeName(u8), status.failure.reason.expected_type.type_name);
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -2594,12 +2623,10 @@ test "std.zon parse int" {
     {
         var ast = try std.zig.Ast.parse(gpa, "256", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(u8, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(status.cannot_represent.type_name, @typeName(u8));
-        const node = status.cannot_represent.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(status.failure.reason.cannot_represent.type_name, @typeName(u8));
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -2613,12 +2640,10 @@ test "std.zon parse int" {
     {
         var ast = try std.zig.Ast.parse(gpa, "-129", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(i8, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(status.cannot_represent.type_name, @typeName(i8));
-        const node = status.cannot_represent.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(status.failure.reason.cannot_represent.type_name, @typeName(i8));
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -2632,12 +2657,10 @@ test "std.zon parse int" {
     {
         var ast = try std.zig.Ast.parse(gpa, "-1", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(u8, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(status.cannot_represent.type_name, @typeName(u8));
-        const node = status.cannot_represent.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(status.failure.reason.cannot_represent.type_name, @typeName(u8));
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -2651,12 +2674,10 @@ test "std.zon parse int" {
     {
         var ast = try std.zig.Ast.parse(gpa, "1.5", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(u8, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(status.cannot_represent.type_name, @typeName(u8));
-        const node = status.cannot_represent.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(status.failure.reason.cannot_represent.type_name, @typeName(u8));
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -2670,12 +2691,10 @@ test "std.zon parse int" {
     {
         var ast = try std.zig.Ast.parse(gpa, "-1.0", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(u8, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(status.cannot_represent.type_name, @typeName(u8));
-        const node = status.cannot_represent.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(status.failure.reason.cannot_represent.type_name, @typeName(u8));
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -2689,11 +2708,9 @@ test "std.zon parse int" {
     {
         var ast = try std.zig.Ast.parse(gpa, "-0", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(i8, gpa, &ast, &status, .{}));
-        const node = status.negative_integer_zero.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -2707,11 +2724,9 @@ test "std.zon parse int" {
     {
         var ast = try std.zig.Ast.parse(gpa, "-0", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(f32, gpa, &ast, &status, .{}));
-        const node = status.negative_integer_zero.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -2729,12 +2744,10 @@ test "std.zon parse int" {
     {
         var ast = try std.zig.Ast.parse(gpa, "--2", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(i8, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(i8), status.expected_type.type_name);
-        const node = status.expected_type.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(@typeName(i8), status.failure.reason.expected_type.type_name);
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -2747,12 +2760,10 @@ test "std.zon parse int" {
     {
         var ast = try std.zig.Ast.parse(gpa, "--2.0", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(f32, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(f32), status.expected_type.type_name);
-        const node = status.expected_type.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(@typeName(f32), status.failure.reason.expected_type.type_name);
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -2826,12 +2837,10 @@ test "std.zon parse float" {
     {
         var ast = try std.zig.Ast.parse(gpa, "foo", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(f32, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(f32), status.expected_type.type_name);
-        const node = status.expected_type.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(@typeName(f32), status.failure.reason.expected_type.type_name);
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -2844,12 +2853,10 @@ test "std.zon parse float" {
     {
         var ast = try std.zig.Ast.parse(gpa, "-foo", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(f32, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(f32), status.expected_type.type_name);
-        const node = status.expected_type.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(@typeName(f32), status.failure.reason.expected_type.type_name);
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
@@ -2863,12 +2870,10 @@ test "std.zon parse float" {
     {
         var ast = try std.zig.Ast.parse(gpa, "\"foo\"", .zon);
         defer ast.deinit(gpa);
-        var status: ParseStatus = .success;
+        var status: ParseStatus = undefined;
         try std.testing.expectError(error.Type, parseFromAst(f32, gpa, &ast, &status, .{}));
-        try std.testing.expectEqualStrings(@typeName(f32), status.expected_type.type_name);
-        const node = status.expected_type.node;
-        const main_tokens = ast.nodes.items(.main_token);
-        const token = main_tokens[node];
+        try std.testing.expectEqualStrings(@typeName(f32), status.failure.reason.expected_type.type_name);
+        const token = status.failure.token;
         const location = ast.tokenLocation(0, token);
         try std.testing.expectEqual(Ast.Location{
             .line = 0,
