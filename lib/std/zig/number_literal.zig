@@ -63,6 +63,14 @@ pub const Error = union(enum) {
         return .{ .data = .{ .err = self, .bytes = bytes } };
     }
 
+    pub fn noteWithSource(self: Error, bytes: []const u8) ?[]const u8 {
+        if (self == .leading_zero) {
+            const is_float = std.mem.indexOfScalar(u8, bytes, '.') != null;
+            if (!is_float) return "use '0o' prefix for octal literals";
+        }
+        return null;
+    }
+
     pub fn offset(self: Error) usize {
         return switch (self) {
             .leading_zero => 0,

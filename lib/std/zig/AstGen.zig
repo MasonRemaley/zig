@@ -8618,13 +8618,8 @@ fn failWithNumberError(
     token: Ast.TokenIndex,
     bytes: []const u8,
 ) InnerError {
-    const is_float = std.mem.indexOfScalar(u8, bytes, '.') != null;
-    const notes: []const u32 = switch (err) {
-        .leading_zero => if (is_float) &.{
-            try astgen.errNoteTok(token, "use '0o' prefix for octal literals", .{}),
-        } else &.{},
-        else => &.{},
-    };
+    const note = err.noteWithSource(bytes);
+    const notes: []const u32 = if (note) |n| &.{try astgen.errNoteTok(token, "{s}", .{n})} else &.{};
     try astgen.appendErrorTokNotesOff(
         token,
         @as(u32, @intCast(err.offset())),
