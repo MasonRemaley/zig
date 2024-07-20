@@ -13,6 +13,7 @@ const File = Zcu.File;
 const LazySrcLoc = Zcu.LazySrcLoc;
 const Ref = std.zig.Zir.Inst.Ref;
 const NullTerminatedString = InternPool.NullTerminatedString;
+const NumberLiteralError = std.zig.number_literal.Error;
 
 const LowerZon = @This();
 
@@ -43,15 +44,8 @@ pub fn lower(
     return lower_zon.expr(root, res_ty);
 }
 
-fn fail(
-    self: LowerZon,
-    loc: LazySrcLoc.Offset,
-    comptime format: []const u8,
-    args: anytype,
-) (Allocator.Error || error{AnalysisFail}) {
-    @setCold(true);
-
-    const src_loc = .{
+fn lazySrcLoc(self: LowerZon, loc: LazySrcLoc.Offset) !LazySrcLoc {
+    return .{
         .base_node_inst = try self.sema.pt.zcu.intern_pool.trackZir(
             self.sema.pt.zcu.gpa,
             .main,
@@ -59,6 +53,16 @@ fn fail(
         ),
         .offset = loc,
     };
+}
+
+fn fail(
+    self: LowerZon,
+    loc: LazySrcLoc.Offset,
+    comptime format: []const u8,
+    args: anytype,
+) (Allocator.Error || error{AnalysisFail}) {
+    @setCold(true);
+    const src_loc = try self.lazySrcLoc(loc);
     const err_msg = try Zcu.ErrorMsg.create(self.sema.pt.zcu.gpa, src_loc, format, args);
     try self.sema.pt.zcu.failed_files.putNoClobber(self.sema.pt.zcu.gpa, self.file, err_msg);
     return error.AnalysisFail;
@@ -579,14 +583,7 @@ fn number(self: LowerZon, node: Ast.Node.Index, is_negative: ?Ast.Node.Index) !I
                         .storage = .{ .f128 = float },
                     } });
                 },
-                .failure => |err| {
-                    const offset = self.file.tree.tokens.items(.start)[token];
-                    return self.fail(
-                        .{ .byte_abs = offset + @as(u32, @intCast(err.offset())) },
-                        "{}",
-                        .{err.fmtWithSource(token_bytes)},
-                    );
-                },
+                .failure => |err| return self.failWithNumberError(token, err),
             }
         },
         .identifier => {
@@ -615,4 +612,50 @@ fn number(self: LowerZon, node: Ast.Node.Index, is_negative: ?Ast.Node.Index) !I
         },
         else => return self.fail(.{ .node_abs = node }, "invalid ZON value", .{}),
     }
+}
+
+fn createErrorWithOptionalNote(
+    self: LowerZon,
+    src_loc: LazySrcLoc,
+    comptime fmt: []const u8,
+    args: anytype,
+    note: ?[]const u8,
+) error{OutOfMemory}!*Zcu.ErrorMsg {
+    const notes = try self.sema.pt.zcu.gpa.alloc(Zcu.ErrorMsg, if (note == null) 0 else 1);
+    errdefer self.sema.pt.zcu.gpa.free(notes);
+    if (note) |n| {
+        notes[0] = try Zcu.ErrorMsg.init(
+            self.sema.pt.zcu.gpa,
+            src_loc,
+            "{s}",
+            .{n},
+        );
+    }
+
+    const err_msg = try Zcu.ErrorMsg.create(
+        self.sema.pt.zcu.gpa,
+        src_loc,
+        fmt,
+        args,
+    );
+    err_msg.*.notes = notes;
+    return err_msg;
+}
+
+fn failWithNumberError(
+    self: LowerZon,
+    token: Ast.TokenIndex,
+    err: NumberLiteralError,
+) (Allocator.Error || error{AnalysisFail}) {
+    const offset = self.file.tree.tokens.items(.start)[token];
+    const src_loc = try self.lazySrcLoc(.{ .byte_abs = offset + @as(u32, @intCast(err.offset())) });
+    const token_bytes = self.file.tree.tokenSlice(token);
+    const err_msg = try self.createErrorWithOptionalNote(
+        src_loc,
+        "{}",
+        .{err.fmtWithSource(token_bytes)},
+        err.noteWithSource(token_bytes),
+    );
+    try self.sema.pt.zcu.failed_files.putNoClobber(self.sema.pt.zcu.gpa, self.file, err_msg);
+    return error.AnalysisFail;
 }

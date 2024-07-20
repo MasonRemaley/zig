@@ -87,11 +87,11 @@ pub const ParseFailure = struct {
         try writer.print("{}:{}", .{ l.line + 1, l.column + 1 + offset });
     }
 
-    pub fn fmtReason(self: *const @This()) std.fmt.Formatter(formatReason) {
+    pub fn fmtError(self: *const @This()) std.fmt.Formatter(formatError) {
         return .{ .data = self };
     }
 
-    fn formatReason(
+    fn formatError(
         self: *const @This(),
         comptime fmt: []const u8,
         options: std.fmt.FormatOptions,
@@ -134,6 +134,46 @@ pub const ParseFailure = struct {
         };
     }
 
+    pub fn noteCount(self: *const @This()) usize {
+        switch (self.reason) {
+            .invalid_number_literal => |r| {
+                const source = self.ast.tokenSlice(self.token);
+                return if (r.err.noteWithSource(source) != null) 1 else 0;
+            },
+            else => return 0,
+        }
+    }
+
+    const FormatNote = struct {
+        failure: *const ParseFailure,
+        index: usize,
+    };
+
+    pub fn fmtNote(self: *const @This(), index: usize) std.fmt.Formatter(formatNote) {
+        return .{ .data = .{ .failure = self, .index = index } };
+    }
+
+    fn formatNote(
+        self: FormatNote,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = options;
+        _ = fmt;
+        switch (self.failure.reason) {
+            .invalid_number_literal => |r| {
+                std.debug.assert(self.index == 0);
+                const source = self.failure.ast.tokenSlice(self.failure.token);
+                try writer.writeAll(r.err.noteWithSource(source).?);
+                return;
+            },
+            else => {},
+        }
+
+        unreachable;
+    }
+
     pub fn format(
         self: @This(),
         comptime fmt: []const u8,
@@ -142,7 +182,7 @@ pub const ParseFailure = struct {
     ) !void {
         _ = fmt;
         _ = options;
-        try writer.print("{}: {}", .{ self.fmtLocation(), self.fmtReason() });
+        try writer.print("{}: {}", .{ self.fmtLocation(), self.fmtError() });
     }
 };
 
@@ -169,6 +209,7 @@ test "std.zon failure/oom formatting" {
     const full = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
     defer gpa.free(full);
     try std.testing.expectEqualStrings("1:1: out of memory", full);
+    try std.testing.expectEqual(0, status.failure.noteCount());
 
     // Verify that we can format the location by itself
     const location = try std.fmt.allocPrint(gpa, "{}", .{status.failure.fmtLocation()});
@@ -176,7 +217,7 @@ test "std.zon failure/oom formatting" {
     try std.testing.expectEqualStrings("1:1", location);
 
     // Verify that we can format the reason by itself
-    const reason = try std.fmt.allocPrint(gpa, "{}", .{status.failure.fmtReason()});
+    const reason = try std.fmt.allocPrint(gpa, "{}", .{status.failure.fmtError()});
     defer std.testing.allocator.free(reason);
     try std.testing.expectEqualStrings("out of memory", reason);
 }
@@ -2555,6 +2596,17 @@ test "std.zon parse int" {
         const formatted = try std.fmt.allocPrint(gpa, "{}", .{status.failure});
         defer gpa.free(formatted);
         try std.testing.expectEqualStrings("1:3: invalid digit 'g' for hex base", formatted);
+    }
+
+    // Notes on invalid int literal
+    {
+        var ast = try std.zig.Ast.parse(gpa, "0123", .zon);
+        defer ast.deinit(gpa);
+        var status: ParseStatus = undefined;
+        try std.testing.expectError(error.Type, parseFromAst(u8, gpa, &ast, &status, .{}));
+        try std.testing.expectFmt("1:1: number '0123' has leading zero", "{}", .{status.failure});
+        try std.testing.expectEqual(1, status.failure.noteCount());
+        try std.testing.expectFmt("use '0o' prefix for octal literals", "{}", .{status.failure.fmtNote(0)});
     }
 }
 
