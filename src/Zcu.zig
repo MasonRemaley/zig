@@ -773,7 +773,10 @@ pub const File = struct {
             return .zon;
         } else if (std.mem.endsWith(u8, path, ".zig")) {
             return .zig;
-        } else unreachable;
+        } else {
+            // `Module.importFile` rejects all other extensions
+            unreachable;
+        }
     }
 
     pub fn unload(file: *File, gpa: Allocator) void {
