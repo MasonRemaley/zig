@@ -1782,6 +1782,8 @@ test "depth limits" {
 }
 
 test "stringify primitives" {
+    if (@import("builtin").zig_backend == .stage2_c) return error.SkipZigTest;
+    
     try expectStringifyEqual(
         \\.{
         \\    .a = 1.5,

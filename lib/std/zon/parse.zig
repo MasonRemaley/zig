@@ -1315,6 +1315,8 @@ fn parseArray(self: *@This(), comptime T: type, comptime options: ParseOptions, 
 
 // Test sizes 0 to 3 since small sizes get parsed differently
 test "std.zon arrays and slices" {
+    if (@import("builtin").zig_backend == .stage2_c) return error.SkipZigTest;
+
     const gpa = std.testing.allocator;
 
     // Literals
