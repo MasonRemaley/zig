@@ -938,22 +938,23 @@ fn parseStruct(self: *@This(), comptime T: type, comptime options: ParseOptions,
     var result: T = undefined;
     var field_found: [field_infos.len]bool = .{false} ** field_infos.len;
 
-    // Fill in the fields we found
-    for (field_nodes, 0..) |field_node, initialized| {
-        // If we fail to parse this field, free all fields before it
-        errdefer if (options.free_on_error and field_infos.len > 0) {
-            for (field_nodes[0..initialized]) |initialized_field_node| {
-                const name_runtime = self.parseIdent(T, self.ast.firstToken(initialized_field_node) - 2) catch unreachable;
-                switch (field_indices.get(name_runtime) orelse continue) {
-                    inline 0...(field_infos.len - 1) => |name_index| {
-                        const name = field_infos[name_index].name;
-                        parseFree(self.gpa, @field(result, name));
-                    },
-                    else => unreachable, // Can't be out of bounds
-                }
+    // If we fail partway through, free all already initialized fields
+    var initialized: usize = 0;
+    errdefer if (options.free_on_error and field_infos.len > 0) {
+        for (field_nodes[0..initialized]) |initialized_field_node| {
+            const name_runtime = self.parseIdent(T, self.ast.firstToken(initialized_field_node) - 2) catch unreachable;
+            switch (field_indices.get(name_runtime) orelse continue) {
+                inline 0...(field_infos.len - 1) => |name_index| {
+                    const name = field_infos[name_index].name;
+                    parseFree(self.gpa, @field(result, name));
+                },
+                else => unreachable, // Can't be out of bounds
             }
-        };
+        }
+    };
 
+    // Fill in the fields we found
+    for (field_nodes) |field_node| {
         const name_token = self.ast.firstToken(field_node) - 2;
         const i = b: {
             const name = try self.parseIdent(T, name_token);
@@ -976,10 +977,9 @@ fn parseStruct(self: *@This(), comptime T: type, comptime options: ParseOptions,
             inline 0...(field_infos.len - 1) => |j| @field(result, field_infos[j].name) = try self.parseExpr(field_infos[j].type, options, field_node),
             else => unreachable, // Can't be out of bounds
         }
-    }
 
-    // If anything else goes wrong, free the result
-    errdefer if (options.free_on_error) parseFree(self.gpa, result);
+        initialized += 1;
+    }
 
     // Fill in any missing default fields
     inline for (field_found, 0..) |found, i| {
