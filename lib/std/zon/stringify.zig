@@ -155,7 +155,7 @@ fn typeIsRecursiveImpl(comptime T: type, comptime visited_arg: []type) bool {
     return false;
 }
 
-test "typeIsRecursive" {
+test "std.zon typeIsRecursive" {
     try std.testing.expect(!typeIsRecursive(bool));
     try std.testing.expect(!typeIsRecursive(struct { x: i32, y: i32 }));
     try std.testing.expect(!typeIsRecursive(struct { i32, i32 }));
@@ -213,7 +213,7 @@ fn expectValueDepthEquals(expected: usize, value: anytype) !void {
     try std.testing.expectError(error.MaxDepth, checkValueDepth(value, expected - 1));
 }
 
-test "checkValueDepth" {
+test "std.zon checkValueDepth" {
     try expectValueDepthEquals(1, 10);
     try expectValueDepthEquals(2, .{ .x = 1, .y = 2 });
     try expectValueDepthEquals(2, .{ 1, 2 });
@@ -822,7 +822,7 @@ fn expectStringifyEqual(expected: []const u8, value: anytype, comptime options: 
     try std.testing.expectEqualStrings(expected, buf.items);
 }
 
-test "stringify whitespace, high level API" {
+test "std.zon stringify whitespace, high level API" {
     try expectStringifyEqual(".{}", .{}, .{});
     try expectStringifyEqual(".{}", .{}, .{ .whitespace = false });
 
@@ -901,7 +901,7 @@ test "stringify whitespace, high level API" {
     , .{ .inner = .{ 1, 2, 3 } }, .{});
 }
 
-test "stringify whitespace, low level API" {
+test "std.zon stringify whitespace, low level API" {
     var buffer = std.ArrayList(u8).init(std.testing.allocator);
     defer buffer.deinit();
     const writer = buffer.writer();
@@ -1256,7 +1256,7 @@ test "stringify whitespace, low level API" {
     }
 }
 
-test "stringify utf8 codepoints" {
+test "std.zon stringify utf8 codepoints" {
     var buffer = std.ArrayList(u8).init(std.testing.allocator);
     defer buffer.deinit();
     const writer = buffer.writer();
@@ -1347,7 +1347,7 @@ test "stringify utf8 codepoints" {
     buffer.clearRetainingCapacity();
 }
 
-test "stringify strings" {
+test "std.zon stringify strings" {
     var buffer = std.ArrayList(u8).init(std.testing.allocator);
     defer buffer.deinit();
     const writer = buffer.writer();
@@ -1418,7 +1418,7 @@ test "stringify strings" {
     buffer.clearRetainingCapacity();
 }
 
-test "stringify multiline strings" {
+test "std.zon stringify multiline strings" {
     var buf = std.ArrayList(u8).init(std.testing.allocator);
     defer buf.deinit();
     const writer = buf.writer();
@@ -1490,7 +1490,7 @@ test "stringify multiline strings" {
     }
 }
 
-test "stringify skip default fields" {
+test "std.zon stringify skip default fields" {
     const Struct = struct {
         x: i32 = 2,
         y: i8,
@@ -1629,7 +1629,7 @@ test "stringify skip default fields" {
     );
 }
 
-test "depth limits" {
+test "std.zon depth limits" {
     var buf = std.ArrayList(u8).init(std.testing.allocator);
     defer buf.deinit();
 
@@ -1781,9 +1781,10 @@ test "depth limits" {
     }
 }
 
-test "stringify primitives" {
+test "std.zon stringify primitives" {
+    // Issue: https://github.com/ziglang/zig/issues/20880
     if (@import("builtin").zig_backend == .stage2_c) return error.SkipZigTest;
-    
+
     try expectStringifyEqual(
         \\.{
         \\    .a = 1.5,
@@ -1871,7 +1872,7 @@ test "stringify primitives" {
     );
 }
 
-test "stringify ident" {
+test "std.zon stringify ident" {
     var buffer = std.ArrayList(u8).init(std.testing.allocator);
     defer buffer.deinit();
     const writer = buffer.writer();
