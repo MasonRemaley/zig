@@ -158,7 +158,7 @@ fn ident(self: LowerZon, token: Ast.TokenIndex) !Ident {
         const gpa = self.sema.gpa;
 
         const raw_string = bytes[1..bytes.len];
-        var parsed = std.ArrayListUnmanaged(u8){};
+        var parsed: std.ArrayListUnmanaged(u8) = .{};
         defer parsed.deinit(gpa);
 
         switch (try std.zig.string_literal.parseWrite(parsed.writer(gpa), raw_string)) {
