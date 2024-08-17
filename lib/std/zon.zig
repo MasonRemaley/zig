@@ -36,7 +36,7 @@
 //! "This string is a valid ZON object."
 //! ```
 //!
-//! \* ZON is not currently a true subset of Zig, because it supports `nan` and
+//! * ZON is not currently a true subset of Zig, because it supports `nan` and
 //!    `inf` literals, which Zig does not.
 //!
 //! # Deserialization
